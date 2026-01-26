@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <data>
+        <import type="com.dan.timelapse.utils.Settings" />
+        <variable
+            name="settings"
+            type="com.dan.timelapse.utils.Settings" />
+    </data>
+
+    <androidx.coordinatorlayout.widget.CoordinatorLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center_horizontal"
+            android:orientation="vertical"
+            android:padding="8dp"
+            android:paddingTop="0dp">
+
+            <!-- MAIN UI CONTAINER -->
+            <LinearLayout
+                android:id="@+id/layoutMain"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- SOURCE -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingTop="0dp"
+                    android:paddingBottom="4dp">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text='@{settings.uiMode == Settings.UI_MODE_EXPERT ? "Source Data:" : "Input:"}'
+                        android:textSize="15sp" android:layout_marginEnd="8dp" />
+                    <TextView android:id="@+id/textFileName" android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text="Select video/images" android:textColor="?attr/colorPrimary" android:textStyle="bold" android:textSize="15sp" />
+                    <View android:layout_width="0dp" android:layout_height="1px" android:layout_weight="1" />
+                    <TextView
+                        android:id="@+id/textInfo"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:singleLine="true"
+                        android:textSize="11sp"
+                        android:alpha="0.6" />
+                </LinearLayout>
+
+                <!-- DURATION / TRIM -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text='@{settings.uiMode == Settings.UI_MODE_EXPERT ? "Using frame range:" : "Trim:"}'
+                        android:textSize="15sp" android:layout_marginEnd="8dp" />
+                    <com.google.android.material.slider.RangeSlider
+                        android:id="@+id/rangeSliderDuration"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        app:thumbColor="?attr/colorPrimary"
+                        app:trackColorActive="?attr/colorPrimary"
+                        app:trackColorInactive="#4D808080"
+                        app:tickColorActive="?attr/colorPrimary"
+                        app:tickColorInactive="#4D808080"
+                        app:labelBehavior="floating"
+                        android:valueFrom="1.0"
+                        android:valueTo="100.0"
+                        app:values="@array/initial_range_values" />
+                    <TextView
+                        android:id="@+id/textDuration"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="all"
+                        android:minWidth="60dp"
+                        android:textAlignment="viewEnd" />
+                </LinearLayout>
+
+                <!-- SPEED / SAMPLING -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text='@{settings.uiMode == Settings.UI_MODE_EXPERT ? "Sampling interval:" : "Speed:"}'
+                        android:textSize="15sp" android:layout_marginEnd="8dp" />
+                    <SeekBar
+                        android:id="@+id/seekBarSpeed"
+                        style="@style/Widget.AppCompat.SeekBar.Discrete"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:max="19"
+                        android:progress="0" />
+                    <TextView
+                        android:id="@+id/textSpeed"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="1x"
+                        android:minWidth="40dp"
+                        android:textAlignment="viewEnd" />
+                </LinearLayout>
+
+                <!-- STABILIZE / ALIGN -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text='@{settings.uiMode == Settings.UI_MODE_EXPERT ? "Align frames:" : "Stabilize:"}'
+                        android:textSize="15sp" android:layout_marginEnd="8dp" />
+                    <androidx.appcompat.widget.SwitchCompat
+                        android:id="@+id/switchAlign"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content" />
+                    <Button
+                        android:id="@+id/buttonAlignMask"
+                        style="@style/Widget.MaterialComponents.Button.TextButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:text="Edit Mask"
+                        android:textAllCaps="false"
+                        android:textSize="12sp"
+                        android:visibility="gone" />
+                </LinearLayout>
+
+                <!-- FILTER / EFFECT -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                        android:text='@{settings.uiMode == Settings.UI_MODE_EXPERT ? "Apply the filter:" : "Effect:"}'
+                        android:textSize="15sp" android:layout_marginEnd="8dp" />
+                    <Spinner
+                        android:id="@+id/spinnerEffect"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:entries="@array/effect" />
+                </LinearLayout>
+
+                <!-- WINDOW / SMOOTHNESS -->
+                <LinearLayout
+                    android:id="@+id/layoutWindow"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+                    <TextView
+                        android:id="@+id/textEffectLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text='@{settings.uiMode == Settings.UI_MODE_EXPERT ? "Temporal window:" : "Smoothness level:"}'
+                        android:textSize="15sp" android:layout_marginEnd="8dp" />
+                    <SeekBar
+                        android:id="@+id/seekBarEffect"
+                        style="@style/Widget.AppCompat.SeekBar.Discrete"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:max="28"
+                        android:progress="0" />
+                    <TextView
+                        android:id="@+id/textEffect"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="2x"
+                        android:minWidth="40dp"
+                        android:textAlignment="viewEnd" />
+                    <TextView
+                        android:id="@+id/textOrLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="or" android:textSize="12sp" android:layout_margin="4dp" />
+                    <androidx.appcompat.widget.SwitchCompat android:id="@+id/switchEndless" android:layout_width="wrap_content" android:layout_height="wrap_content" />
+                    <TextView
+                        android:id="@+id/textEndlessLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Endless" android:textSize="12sp" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- ACTION BUTTONS -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:paddingTop="8dp"
+                android:paddingBottom="4dp">
+                <Button android:id="@+id/buttonPlayOriginal" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:insetTop="0dp" android:insetBottom="0dp" android:text="Show Original" android:textSize="12sp" android:textAllCaps="false" />
+                <Button android:id="@+id/buttonPlayGenerated" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:layout_marginStart="8dp" android:insetTop="0dp" android:insetBottom="0dp" android:text="Process &amp; Play" android:textSize="12sp" android:textAllCaps="false" />
+                <Button android:id="@+id/buttonStop" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="36dp" android:layout_height="36dp" android:layout_marginStart="8dp" android:insetTop="0dp" android:insetBottom="0dp" android:padding="0dp" app:icon="@android:drawable/ic_media_pause" app:iconGravity="textStart" app:iconPadding="0dp" />
+            </LinearLayout>
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:background="#1A000000">
+                <VideoView android:id="@+id/video" android:layout_width="match_parent" android:layout_height="match_parent" android:layout_gravity="center" />
+                <ImageView android:id="@+id/imagePreview" android:layout_width="match_parent" android:layout_height="match_parent" android:layout_gravity="center" android:scaleType="fitCenter" android:visibility="gone" />
+            </FrameLayout>
+
+        </LinearLayout>
+
+    </androidx.coordinatorlayout.widget.CoordinatorLayout>
+</layout>

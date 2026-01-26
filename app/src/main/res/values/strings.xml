@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">TimeLapse</string>
+    <string-array name="effect">
+        <item>None</item>
+        <item>Average</item>
+        <item>Average weighted for last</item>
+        <item>Average weighted for light</item>
+        <item>Lightest pixels</item>
+        <item>Add</item>
+        <item>HDR</item>
+        <item>Transition</item>
+        <item>Darkest pixels</item>
+        <item>Motion Extraction</item>
+        <item>Median Stack (Noise Reduction)</item>
+    </string-array>
+    <string-array name="orientation">
+        <item>Auto</item>
+        <item>Landscape</item>
+        <item>Portrait</item>
+    </string-array>
+</resources>
