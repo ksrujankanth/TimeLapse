@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Light Theme Colors -->
+    
+    <!-- Background colors -->
+    <color name="colorBackground">#FFFFFF</color>
+    <color name="colorSurface">#F5F5F5</color>
+    <color name="colorSurfaceVariant">#E8E8E8</color>
+    <color name="colorTrayBackground">#F5F5F5</color>
+    
+    <!-- Primary accent colors -->
+    <color name="colorPrimary">#4FC3F7</color>
+    <color name="colorPrimaryVariant">#29B6F6</color>
+    <color name="colorOnPrimary">#FFFFFF</color>
+    <color name="colorSecondary">#4FC3F7</color>
+    <color name="colorOnSecondary">#FFFFFF</color>
+    
+    <!-- Text colors -->
+    <color name="colorOnBackground">#1A1A1A</color>
+    <color name="colorOnSurface">#1A1A1A</color>
+    <color name="colorHelperText">#99000000</color>
+    <color name="colorHelperTextSecondary">#66000000</color>
+    
+    <!-- UI element colors -->
+    <color name="colorDivider">#33000000</color>
+    <color name="colorDimmer">#1A000000</color>
+    <color name="colorOverlay">#99000000</color>
+    
+    <!-- Status colors -->
+    <color name="colorSuccess">#4CAF50</color>
+    <color name="colorError">#FF5252</color>
+    <color name="colorWarning">#FFB74D</color>
+    
+    <!-- Split button colors -->
+    <color name="split_button_primary">@color/colorPrimary</color>
+    <color name="split_button_primary_dark">@color/colorPrimaryVariant</color>
+    <color name="split_button_text">#FFFFFF</color>
+    <color name="split_button_text_disabled">#66FFFFFF</color>
+    <color name="split_button_divider">#40FFFFFF</color>
+    
+    <!-- Progress bar -->
+    <color name="progress_line_start">#4FC3F7</color>
+    <color name="progress_line_end">#81D4FA</color>
+    <color name="progress_line_background">#33000000</color>
+    
+    <!-- Navigation -->
+    <color name="nav_background">#FFFFFF</color>
+    <color name="nav_item_active">#4FC3F7</color>
+    <color name="nav_item_inactive">#66000000</color>
+    
+    <!-- Empty state -->
+    <color name="empty_state_background">#F0F0F0</color>
+    <color name="empty_state_text">#888888</color>
+    
+    <!-- Dialog -->
+    <color name="dialog_background">#FFFFFF</color>
+    <color name="dialog_cancel_button">#FF5252</color>
+    
+    <!-- Toast -->
+    <color name="toast_background">#CC333333</color>
+    <color name="toast_text">#DDDDDD</color>
+    
+    <!-- Stabilization indicator -->
+    <color name="stabilization_active">#4CAF50</color>
+    <color name="stabilization_disabled">#999999</color>
+    
+    <!-- Glow accent for active toggle buttons (cyan) -->
+    <color name="glow_accent">#00BCD4</color>
+    <color name="cyan_accent">#00BCD4</color>
+    
+    <!-- Legacy compatibility -->
+    <color name="primary_accent">@color/colorPrimary</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="progress_line_color">#808080</color>
+    <color name="dimmer_overlay">@color/colorDimmer</color>
+    <color name="tray_background">@color/colorTrayBackground</color>
+</resources>

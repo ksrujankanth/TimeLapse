@@ -1,0 +1,28 @@
+package com.dan.timelapse.filters
+
+import org.opencv.core.Mat
+
+abstract class FramesFilter(private val nextConsumer: FramesConsumer) : FramesConsumer {
+    open fun startFilter() {}
+    open fun stopFilter() {}
+
+    fun next(index: Int, frame: Mat) {
+        nextConsumer.consume(index, frame)
+    }
+
+    override fun start() {
+        startFilter()
+        nextConsumer.start()
+    }
+
+    override fun stop(canceled: Boolean) {
+        nextConsumer.stop(canceled)
+        stopFilter()
+    }
+
+    override fun getWindowSize(): Int {
+        val nextWindow = nextConsumer.getWindowSize()
+        if (nextWindow == 0) return 0
+        return nextWindow
+    }
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Enabled state - white icons -->
+    <item android:color="#FFFFFF" android:state_enabled="true"/>
+    <!-- Disabled state - 50% opacity white -->
+    <item android:color="#80FFFFFF" android:state_enabled="false"/>
+</selector>

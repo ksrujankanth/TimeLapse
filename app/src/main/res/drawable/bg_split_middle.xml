@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="?attr/colorControlHighlight">
+    <item>
+        <layer-list>
+            <!-- Left edge separator (1.5px dark line for 3px total with gap) -->
+            <item android:left="1.5dp">
+                <shape android:shape="rectangle">
+                    <solid android:color="#40000000" />
+                </shape>
+            </item>
+            <!-- Main pill background -->
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="?attr/colorPrimary" />
+                    <corners android:radius="0dp" />
+                </shape>
+            </item>
+            <!-- Right edge separator (1.5px dark line for 3px total with gap) -->
+            <item android:right="1.5dp">
+                <shape android:shape="rectangle">
+                    <solid android:color="#40000000" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+</ripple>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/nav_source"
+        android:icon="@drawable/ic_folder"
+        android:title="Media" />
+    <item
+        android:id="@+id/nav_transform"
+        android:icon="@drawable/ic_edit"
+        android:title="Adjust" />
+    <item
+        android:id="@+id/nav_studio"
+        android:icon="@drawable/ic_movie"
+        android:title="Effects" />
+    <item
+        android:id="@+id/nav_finish"
+        android:icon="@drawable/ic_check"
+        android:title="Save" />
+</menu>

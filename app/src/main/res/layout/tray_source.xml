@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    style="@style/Widget.App.Tray">
+
+    <!-- Initial State: Split-Button Hero -->
+    <LinearLayout
+        android:id="@+id/layout_initial"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- Split-Button Pill: [ LOAD MEDIA ] [ ⋮ ] -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginVertical="4dp"
+            android:orientation="horizontal"
+            android:weightSum="10">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnLoadHero"
+                style="@style/Widget.Material3.Button"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="8"
+                android:layout_marginEnd="4dp"
+                android:text="@string/load_media"
+                android:textColor="?attr/colorOnPrimary"
+                android:textSize="17sp"
+                android:gravity="center"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                app:icon="@drawable/ic_folder"
+                app:iconSize="24dp"
+                app:iconPadding="16dp"
+                app:iconGravity="textStart"
+                app:iconTint="?attr/colorOnPrimary"
+                app:backgroundTint="?attr/colorPrimary"
+                app:cornerRadius="28dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnLoadMenu"
+                style="@style/Widget.Material3.Button"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="2"
+                android:layout_marginStart="4dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                app:icon="@drawable/ic_three_dots"
+                app:iconSize="20dp"
+                app:iconPadding="0dp"
+                app:iconGravity="textStart"
+                app:iconTint="?attr/colorOnPrimary"
+                app:backgroundTint="?attr/colorPrimary"
+                app:cornerRadius="28dp"
+                android:contentDescription="Load options" />
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- Loaded State -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/layout_loaded"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- Fill Screen + Frame Duration on SAME line -->
+        <LinearLayout
+            android:id="@+id/fill_duration_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="end|center_vertical"
+            app:layout_constraintTop_toTopOf="parent">
+
+            <!-- Fill Screen Switch -->
+            <TextView
+                android:id="@+id/textFillScreen"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Fill screen"
+                android:textColor="?android:attr/textColorSecondary"
+                android:textSize="14sp"
+                android:visibility="gone" />
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/switchZoomToFill"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+        <!-- Selection Status TextView - color-coded (orange=partial, green=full) -->
+        <TextView
+            android:id="@+id/text_selection_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textAlignment="center"
+            android:textSize="13sp"
+            android:fontFamily="sans-serif-medium"
+            android:visibility="gone"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Trim Slider (for videos) -->
+        <com.google.android.material.slider.RangeSlider
+            android:id="@+id/rangeSliderDuration"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:valueFrom="1.0"
+            android:valueTo="100.0"
+            app:tickVisible="false"
+            app:labelBehavior="floating"
+            app:layout_constraintTop_toBottomOf="@id/text_selection_status" />
+
+        <!-- Change Media Split-Button: [ CHANGE MEDIA ] [ ⋮ ] -->
+        <LinearLayout
+            android:id="@+id/splitPillChangeMedia"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:weightSum="10"
+            app:layout_constraintTop_toBottomOf="@id/rangeSliderDuration">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnChangeMedia"
+                style="@style/Widget.Material3.Button"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="8"
+                android:layout_marginEnd="4dp"
+                android:text="@string/change_media"
+                android:textColor="?attr/colorOnPrimary"
+                android:textSize="15sp"
+                android:gravity="center"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                app:icon="@drawable/ic_folder"
+                app:iconSize="28dp"
+                app:iconPadding="8dp"
+                app:iconGravity="textStart"
+                app:iconTint="?attr/colorOnPrimary"
+                app:backgroundTint="?attr/colorPrimary"
+                app:cornerRadius="28dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnChangeMediaMenu"
+                style="@style/Widget.Material3.Button"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="2"
+                android:layout_marginStart="4dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:padding="0dp"
+                app:icon="@drawable/ic_three_dots"
+                app:iconSize="24dp"
+                app:iconPadding="0dp"
+                app:iconGravity="textStart"
+                app:iconTint="?attr/colorOnPrimary"
+                app:backgroundTint="?attr/colorPrimary"
+                app:cornerRadius="28dp"
+                android:contentDescription="Change media options" />
+        </LinearLayout>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

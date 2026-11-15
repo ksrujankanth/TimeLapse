@@ -1,0 +1,124 @@
+<resources>
+    <string name="app_name">TimeLapse</string>
+    <string name="source_folder">Folder</string>
+    <string name="source_video">Video</string>
+    <string name="source_images">Images</string>
+    <string name="source_last">Last</string>
+    <string name="ratio_label">Ratio: %s</string>
+    
+    <!-- Split-Button Dynamic Labels -->
+    <string name="load_media">Load media</string>
+    <string name="load_video">Load video</string>
+    <string name="load_images">Load images</string>
+    <string name="load_folder">Load folder</string>
+    <string name="change_media">Change media</string>
+    <string name="generate_video">Apply Effect</string>
+    <string name="share_video">Share video</string>
+    <string name="share_image">Share image</string>
+    <string name="save_gallery">Save to Gallery</string>
+    <string name="stabilize">Stabilize</string>
+    <string name="rotate">Rotate</string>
+    <string name="aspect_ratio">Ratio</string>
+    
+    <!-- Menu Options -->
+    <string name="menu_load_last">Load Last Session</string>
+    <string name="menu_pick_video">Pick a Video</string>
+    <string name="menu_pick_images">Pick an Image Sequence</string>
+    <string name="menu_pick_folder">Pick a Folder</string>
+    <string name="menu_edit_mask">Edit Mask</string>
+    <string name="menu_subsample">Subsampling</string>
+    <string name="menu_auto_save">Save video to gallery automatically after rendering is finished</string>
+    <string name="menu_h265">H.265 (HEVC)</string>
+    <string name="menu_resolution">Resolution</string>
+    <string name="menu_bitrate">Bitrate</string>
+    <string name="menu_fps">Frame Rate</string>
+    <string name="menu_pick_frame">Pick Specific Frame</string>
+    <string name="menu_full_res">Full-Res Render</string>
+    
+    <!-- Helper Texts -->
+    <string name="helper_stacking">Average Stacking - skipping every Nth frame</string>
+    <string name="helper_video_specs">%1$sp at %2$dfps%3$s</string>
+    <string name="helper_frame">Frame %1$d at %2$d x %3$d</string>
+    <string name="helper_trim">Choose a part to render.</string>
+    <string name="helper_mask_edit">You can zoom in to make fine adjustments. All changes auto-saved.</string>
+    <string name="helper_speed">at %dx speed</string>
+    <string name="helper_image_frame">Frame %1$d selected</string>
+    <string name="helper_resolution">%1$s at %2$dfps</string>
+    
+    <!-- Toast Messages -->
+    <string name="toast_mask_saved">Mask saved</string>
+    <string name="toast_video_saved">Video saved to gallery</string>
+    <string name="toast_image_saved">Image saved to gallery</string>
+    
+    <!-- Labels -->
+    <string name="label_auto_align">Stabilize Camera (Removes shaky hand movements for a perfectly smooth timelapse)</string>
+    <string name="label_crop_images">Crop Images</string>
+    <string name="label_endless">Endless</string>
+    <string name="label_sampling">Sampling</string>
+    <string name="label_effect">Effect</string>
+
+    <string name="range_slider_helper_text">Default 10 seconds / 300 frames. Select the portion you wish to render.</string>
+    <string name="status_preview_chunk_video">Selected: %1$s to %2$s (Preview Chunk — %3$s)</string>
+    <string name="status_preview_chunk_images">Selected: %1$d frames (Preview Chunk)</string>
+    <string name="status_full_video">Selected: Full Video (%1$s)</string>
+    <string name="status_full_images">Selected: All %1$d Frames</string>
+    <string name="advanced_settings_label">Advanced Settings —</string>
+    <string name="export_settings_label">Export Settings —</string>
+    <string name="finish_image_helper_text">Save the current preview as a high-quality photograph.</string>
+    <string name="finish_video_helper_text">Save the entire edited timelapse video to your gallery.</string>
+
+    <string name="finish_image_section_header">Image</string>
+    <string name="finish_save_rendered_frame">Save Rendered Frame</string>
+    <string name="finish_select_frame">Select Frame</string>
+    <string name="finish_save_full_res_image">Save Full-Res Image</string>
+    <string name="finish_video_section_header">Video</string>
+    <string name="finish_save_video">Save Video</string>
+    <string name="finish_h265_switch">High Efficiency (H.265)</string>
+    <string name="finish_h265_not_supported">H.265 not supported on this device.</string>
+    <string name="finish_bitrate_label">Bitrate</string>
+    <string name="finish_fps_label">Frame Rate (FPS)</string>
+
+    <string-array name="effect_names">
+        <item>None</item>
+        <item>Average</item>
+        <item>Motion Blur</item>
+        <item>Lighten Average</item>
+        <item>Light Trails</item>
+        <item>Sum (Long Exposure)</item>
+        <item>HDR</item>
+        <item>Transition</item>
+        <item>Darken (Noise Clean)</item>
+        <item>Motion Extract</item>
+        <item>Median (Cleanest)</item>
+        <item>Super Resolution</item>
+    </string-array>
+
+    <string-array name="effect_descriptions">
+        <item>No effect applied.</item>
+        <item>Standard smooth stacking for noise reduction.</item>
+        <item>Blurs movement by prioritizing recent frames.</item>
+        <item>Emphasizes light changes over time.</item>
+        <item>Star-trail effect; keeps the brightest pixels.</item>
+        <item>Simulates a physical long-exposure camera.</item>
+        <item>Enhances dynamic range across the stack.</item>
+        <item>Creates a smooth morph between time points.</item>
+        <item>Removes flickering by keeping darkest pixels.</item>
+        <item>Isolates only what moved in the scene.</item>
+        <item>Best for removing people/moving objects.</item>
+        <item>Multi-frame super resolution from a selected anchor frame.</item>
+    </string-array>
+
+    <string-array name="effect">
+        <item>Average</item>
+        <item>Motion Blur</item>
+        <item>Light Trails</item>
+        <item>Lighten Average</item>
+        <item>Darken (Noise Clean)</item>
+        <item>HDR</item>
+        <item>Sum (Long Exposure)</item>
+        <item>Median (Cleanest)</item>
+        <item>Motion Extract</item>
+        <item>Transition</item>
+        <item>None</item>
+    </string-array>
+</resources>

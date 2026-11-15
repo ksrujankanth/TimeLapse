@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:padding="24dp">
+
+    <com.google.android.material.slider.RangeSlider
+        android:id="@+id/rangeSliderDuration"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:labelBehavior="floating"
+        android:valueFrom="1.0"
+        android:valueTo="100.0" />
+
+    <TextView
+        android:id="@+id/text_range_helper"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/range_slider_helper_text"
+        android:textAlignment="center"
+        android:textSize="12sp"
+        android:textColor="?android:attr/textColorSecondary"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnChangeMedia"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:text="Change Media"
+            android:textSize="17sp"
+            app:iconSize="24dp"
+            app:iconPadding="2dp"
+            app:iconTint="?attr/colorOnPrimary" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="66dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+
+</LinearLayout>

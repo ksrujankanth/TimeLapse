@@ -1,0 +1,59 @@
+MIT License
+
+Copyright (c) 2026 Srujan (ksrujankanth)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Attribution request
+
+You do not have to credit anyone to use this software; the MIT grant above
+stands on its own. If you fork it, ship a modified build, or use a
+substantial part of it in another project, a credit and a link back are
+appreciated:
+
+  https://github.com/ksrujankanth/TimeLapse
+
+
+Original work
+
+TimeLapse was started by dan, who wrote and released versions up to 1.5.
+That early version is the foundation of this project. Versions 2.0 and later
+were written and are maintained by Srujan (ksrujankanth), who holds copyright
+on the changes made from 2.0 onward. The MIT terms above apply to this
+repository as it is published here.
+
+
+Third-party components
+
+This repository includes the OpenCV Android module (Java sources and prebuilt
+native libraries) under opencv/. OpenCV is licensed under the Apache License
+2.0, see https://opencv.org/license/ and https://github.com/opencv/opencv.
+The OpenCV code and binaries keep their own license and are not relicensed
+under the MIT terms above.
+
+Kotlin, AndroidX, Material Components, and the other libraries resolved by
+Gradle at build time are not part of this repository. They keep their own
+licenses, which are mostly Apache 2.0.
+
+
+Not affiliated
+
+This is an independent project. It is not published by, endorsed by, or
+supported by dan, Google, or the OpenCV project.

@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    style="@style/Widget.App.Tray"
+    android:descendantFocusability="afterDescendants">
+
+    <!-- Effect Picker Row -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/spinnerEffectLayout"
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="@string/label_effect"
+            app:endIconMode="dropdown_menu"
+            app:endIconDrawable="@drawable/ic_dropdown_arrow">
+
+            <AutoCompleteTextView
+                android:id="@+id/spinnerEffect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="none"
+                android:text="Average"
+                android:textSize="16sp"
+                android:focusable="false"
+                android:focusableInTouchMode="false"
+                android:clickable="true" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchEndless"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:minHeight="48dp"
+            android:padding="8dp"
+            android:text="@string/label_endless"
+            android:textSize="14sp" />
+
+    </LinearLayout>
+
+    <!-- Effect Description -->
+    <TextView
+        android:id="@+id/textEffectDescription"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Standard smooth stacking for noise reduction."
+        style="@style/TextAppearance.TimeLapse.Helper" />
+
+    <!-- None Effect Helper Text -->
+    <TextView
+        android:id="@+id/textNoneEffectHelper"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="Standard Video (Applies your crop, rotation, and stabilization)"
+        style="@style/TextAppearance.TimeLapse.Helper"
+        android:visibility="gone" />
+
+    <!-- Sampling Slider - Inline -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/textSamplingLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Effect Intensity (Blends 10 frames)"
+            android:textColor="?attr/colorOnSurface"
+            android:textSize="14sp" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/sliderSampling"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="8dp"
+            android:stepSize="1"
+            android:value="10"
+            android:valueFrom="2"
+            android:valueTo="30" />
+
+    </LinearLayout>
+
+    <!-- Helper text -->
+    <TextView
+        android:id="@+id/textHelperStacking"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Controls how many frames are merged together to create the final look."
+        style="@style/TextAppearance.TimeLapse.Helper" />
+
+    <!-- Speed Summary Text -->
+    <TextView
+        android:id="@+id/tvSpeedSummary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textAlignment="center"
+        android:textColor="?attr/colorSecondary"
+        android:textStyle="bold"
+        android:textSize="14sp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="4dp"
+        android:visibility="gone"
+        android:text="6x Speed (Skipping 5 frames between captures)" />
+
+    <!-- Generate Split-Button: [ GENERATE VIDEO ] [ ⋮ ] -->
+    <LinearLayout
+        android:id="@+id/splitPillGenerate"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal"
+        android:weightSum="10">
+
+        <!-- Left: Generate (80%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnGenerate"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="8"
+            android:layout_marginEnd="4dp"
+            android:text="@string/generate_video"
+            android:textColor="?attr/colorOnPrimary"
+            android:textSize="17sp"
+            android:gravity="center"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            app:icon="@drawable/ic_movie"
+            app:iconSize="24dp"
+            app:iconPadding="16dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+
+        <!-- Right: Menu (20%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnGenerateMenu"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:layout_marginStart="4dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            android:contentDescription="Generate options"
+            app:icon="@drawable/ic_three_dots"
+            app:iconSize="20dp"
+            app:iconPadding="0dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+    </LinearLayout>
+
+</LinearLayout>

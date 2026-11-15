@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Subtle progress bar: 50% grey for progress, transparent for remaining -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Background track - transparent (shows black video background) -->
+    <item android:id="@android:id/background">
+        <shape>
+            <solid android:color="@android:color/transparent"/>
+        </shape>
+    </item>
+    
+    <!-- Progress - 50% grey -->
+    <item android:id="@android:id/progress">
+        <clip>
+            <shape>
+                <solid android:color="#808080"/>
+            </shape>
+        </clip>
+    </item>
+</layer-list>

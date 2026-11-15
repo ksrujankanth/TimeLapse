@@ -1,0 +1,65 @@
+package com.dan.timelapse
+
+enum class Effect {
+    NONE,
+    AVERAGE,
+    ENDLESS_AVERAGE,
+    AVERAGE_WEIGHTED_FOR_LAST,
+    ENDLESS_AVERAGE_WEIGHTED_FOR_LAST,
+    AVERAGE_WEIGHTED_FOR_LIGHT,
+    ENDLESS_AVERAGE_WEIGHTED_FOR_LIGHT,
+    LIGHTEST_PIXELS,
+    ENDLESS_LIGHTEST_PIXELS,
+    ADD,
+    ENDLESS_ADD,
+    HDR,
+    TRANSITION,
+    DARKEST_PIXELS,
+    ENDLESS_DARKEST_PIXELS,
+    MOTION_EXTRACTION,
+    ENDLESS_MOTION_EXTRACTION,
+    MEDIAN_STACK,
+    ENDLESS_MEDIAN_STACK,
+    DIFFERENCE,
+    ENDLESS_DIFFERENCE,
+    SUPER_RESOLUTION;
+
+    val supportsEndless: Boolean
+        get() = when(this) {
+            AVERAGE, AVERAGE_WEIGHTED_FOR_LAST, AVERAGE_WEIGHTED_FOR_LIGHT, LIGHTEST_PIXELS, ADD, DARKEST_PIXELS, MOTION_EXTRACTION, MEDIAN_STACK, DIFFERENCE -> true
+            else -> false
+        }
+
+    fun toEndless(): Effect {
+        return when(this) {
+            AVERAGE -> ENDLESS_AVERAGE
+            AVERAGE_WEIGHTED_FOR_LAST -> ENDLESS_AVERAGE_WEIGHTED_FOR_LAST
+            AVERAGE_WEIGHTED_FOR_LIGHT -> ENDLESS_AVERAGE_WEIGHTED_FOR_LIGHT
+            LIGHTEST_PIXELS -> ENDLESS_LIGHTEST_PIXELS
+            ADD -> ENDLESS_ADD
+            DARKEST_PIXELS -> ENDLESS_DARKEST_PIXELS
+            MOTION_EXTRACTION -> ENDLESS_MOTION_EXTRACTION
+            MEDIAN_STACK -> ENDLESS_MEDIAN_STACK
+            DIFFERENCE -> ENDLESS_DIFFERENCE
+            SUPER_RESOLUTION -> SUPER_RESOLUTION
+            else -> this
+        }
+    }
+
+    val friendlyName: String
+        get() = when(this) {
+            NONE -> "None"
+            AVERAGE, ENDLESS_AVERAGE -> "Average"
+            AVERAGE_WEIGHTED_FOR_LAST, ENDLESS_AVERAGE_WEIGHTED_FOR_LAST -> "Motion Blur"
+            AVERAGE_WEIGHTED_FOR_LIGHT, ENDLESS_AVERAGE_WEIGHTED_FOR_LIGHT -> "Lighten Average"
+            LIGHTEST_PIXELS, ENDLESS_LIGHTEST_PIXELS -> "Light Trails"
+            ADD, ENDLESS_ADD -> "Sum"
+            HDR -> "HDR"
+            TRANSITION -> "Transition"
+            DARKEST_PIXELS, ENDLESS_DARKEST_PIXELS -> "Darken"
+            MOTION_EXTRACTION, ENDLESS_MOTION_EXTRACTION -> "Motion Extract"
+            MEDIAN_STACK, ENDLESS_MEDIAN_STACK -> "Median"
+            DIFFERENCE, ENDLESS_DIFFERENCE -> "Difference"
+            SUPER_RESOLUTION -> "Super Resolution"
+        }
+}

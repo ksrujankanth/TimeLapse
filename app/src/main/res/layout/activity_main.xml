@@ -1,0 +1,336 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/main_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000">
+
+<!-- Global Progress Bar -->
+    <com.google.android.material.progressindicator.LinearProgressIndicator
+        android:id="@+id/globalProgressBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:indeterminate="true"
+        android:visibility="gone"
+        app:trackThickness="4dp"
+        app:indicatorColor="?attr/colorPrimary"
+        app:trackColor="#333333" />
+
+    <!-- LAYER 1: Video Container (Bottom Layer) - Always full screen, not affected by tray -->
+    <com.dan.timelapse.widgets.ZoomableFrameLayout
+        android:id="@+id/video_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_alignParentTop="true"
+        android:layout_above="@id/bottom_navigation"
+        android:clickable="true"
+        android:focusable="true">
+
+        <!-- Empty State Call to Action -->
+        <LinearLayout
+            android:id="@+id/emptyStateOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:clickable="true"
+            android:focusable="true"
+            android:background="@drawable/empty_state_bg">
+
+            <ImageView
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:src="@drawable/ic_add"
+                android:alpha="0.8"
+                app:tint="?attr/colorPrimary" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="No Media Selected"
+                android:textColor="?attr/colorOnSurface"
+                android:alpha="0.9"
+                android:textStyle="bold"
+                android:textSize="20sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Tap anywhere to choose a video or image sequence"
+                android:textColor="?attr/colorOnSurface"
+                android:alpha="0.6"
+                android:textSize="14sp" />
+
+        </LinearLayout>
+
+        <com.dan.timelapse.widgets.TextureVideoView
+            android:id="@+id/videoView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <ProgressBar
+            android:id="@+id/loadingSpinner"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:visibility="gone"
+            android:indeterminateTint="?attr/colorPrimary" />
+
+        <com.dan.timelapse.widgets.TouchImageView
+            android:id="@+id/mainVideoView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <com.dan.timelapse.widgets.MaskView
+            android:id="@+id/maskOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clickable="true"
+            android:focusable="true"
+            android:visibility="gone" />
+
+        <!-- Dimmer View (10% black overlay) -->
+        <View
+            android:id="@+id/dimmerView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#1A000000"
+            android:visibility="gone" />
+
+        <!-- 2px Progress Line at bottom -->
+        <View
+            android:id="@+id/progressLine"
+            android:layout_width="match_parent"
+            android:layout_height="2dp"
+            android:layout_gravity="bottom"
+            android:background="@color/progress_line_color"
+            android:visibility="gone" />
+
+    </com.dan.timelapse.widgets.ZoomableFrameLayout>
+
+    <!-- Frame Selector Overlay - acts like seekbar for rendered video -->
+    <LinearLayout
+        android:id="@+id/frameSelectorOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@id/tray_root"
+        android:layout_marginBottom="70dp"
+        android:background="#EE111111"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="4dp">
+
+            <TextView
+                android:id="@+id/textFrameInfo"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Frame: 0:00.000"
+                android:textColor="@android:color/white"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnConfirmFrame"
+                style="@style/Widget.Material3.Button.UnelevatedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Done"
+                android:textColor="?attr/colorOnPrimary"
+                app:backgroundTint="?attr/colorPrimary"
+                app:cornerRadius="20dp" />
+        </LinearLayout>
+        
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="By default, the last frame is selected. Use the slider to pick a different frame."
+            android:textColor="#AAAAAA"
+            android:textSize="12sp"
+            android:layout_marginBottom="8dp" />
+
+        <com.google.android.material.slider.Slider
+            android:id="@+id/fullScreenFrameSlider"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:valueFrom="0"
+            android:valueTo="100"
+            app:tickVisible="false"
+            app:thumbColor="?attr/colorPrimary"
+            app:trackColorActive="?attr/colorPrimary"
+            app:trackColorInactive="#444444"
+            app:labelBehavior="gone" />
+            
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchFullRes"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Full-Resolution Export (Renders Again)"
+            android:textColor="@android:color/white"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <!-- LAYER 2: Tray Root (Middle Layer) -->
+    <androidx.coordinatorlayout.widget.CoordinatorLayout
+        android:id="@+id/tray_root"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@id/bottom_navigation"
+        android:layout_alignWithParentIfMissing="true">
+
+        <!-- Tray Container -->
+        <androidx.cardview.widget.CardView
+            android:id="@+id/tray_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone"
+            android:clickable="true"
+            android:focusable="true"
+            app:cardBackgroundColor="#222"
+            app:cardCornerRadius="28dp"
+            app:cardElevation="24dp">
+
+            <FrameLayout
+                android:id="@+id/tray_content_holder"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content" />
+
+        </androidx.cardview.widget.CardView>
+
+    </androidx.coordinatorlayout.widget.CoordinatorLayout>
+
+    <!-- Loading Overlay -->
+    <FrameLayout
+        android:id="@+id/loadingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#99000000"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <ProgressBar
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:indeterminate="true" />
+
+        <TextView
+            android:id="@+id/processingStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="80dp"
+            android:text="Rendering Video..."
+            android:textColor="#FFF"
+            android:textSize="16sp" />
+    </FrameLayout>
+
+    <!-- Tab Status Toast (centered on screen) -->
+    <LinearLayout
+        android:id="@+id/tabStatusToast"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_centerInParent="true"
+        android:background="@drawable/toast_background"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingTop="6dp"
+        android:paddingEnd="12dp"
+        android:paddingBottom="6dp"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/tabStatusIcon"
+            android:layout_width="16dp"
+            android:layout_height="16dp"
+            android:src="@drawable/ic_media_play"
+            app:tint="#DDDDDD" />
+
+        <TextView
+            android:id="@+id/tabStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:text="Original"
+            android:textColor="#DDDDDD"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+    <!-- Play/Pause Toast (centered on screen) -->
+    <FrameLayout
+        android:id="@+id/playPauseToast"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_centerInParent="true"
+        android:background="@drawable/toast_background_circle"
+        android:visibility="gone">
+
+        <ImageView
+            android:id="@+id/playPauseIcon"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_gravity="center"
+            android:src="@drawable/ic_media_play"
+            app:tint="@android:color/white" />
+
+    </FrameLayout>
+
+    <!-- SeekBar - Interactive scrubbing above bottom navigation -->
+    <SeekBar
+        android:id="@+id/videoSeekBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@id/bottom_navigation"
+        android:paddingTop="12dp"
+        android:paddingBottom="12dp"
+        android:thumbTint="?attr/colorPrimary"
+        android:progressTint="?attr/colorPrimary"
+        android:visibility="gone" />
+
+    <!-- LAYER 3: Bottom Navigation (Top Layer) -->
+    <com.google.android.material.bottomnavigation.BottomNavigationView
+        android:id="@+id/bottom_navigation"
+        style="@style/App.BottomNavigationView"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_alignParentBottom="true"
+        android:background="#111"
+        android:elevation="16dp"
+        android:translationZ="10dp"
+        app:itemIconTint="@color/nav_item_color_state"
+        app:itemTextColor="@color/nav_item_color_state"
+        app:menu="@menu/bottom_nav_menu"
+        app:labelVisibilityMode="labeled" />
+
+    <!-- Debug Monitor Overlay - Must be last to render on top -->
+    <TextView
+        android:id="@+id/tvDebugMonitor"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentEnd="true"
+        android:padding="8dp"
+        android:textColor="#00FF00"
+        android:textSize="12sp"
+        android:background="#80000000"
+        android:lines="5"
+        android:visibility="visible"
+        tools:text="Tick: 0\nJVM: 0/0MB\nNative: 0MB\nState: Zoom" />
+
+</RelativeLayout>

@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    style="@style/Widget.App.Tray">
+
+    <!-- Single Pill Row: [ ROTATE | RATIO ] - Both are separate pills -->
+    <LinearLayout
+        android:id="@+id/splitPillRotateRatio"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:weightSum="1.0">
+
+        <!-- Left: Rotate (50%) - Perfect Single Pill -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRotate"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="0.5"
+            android:layout_marginEnd="4dp"
+            android:text="Rotate"
+            android:textSize="17sp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textColor="?attr/colorOnPrimary"
+            app:icon="@drawable/ic_rotate"
+            app:iconSize="24dp"
+            app:iconPadding="16dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp" />
+
+        <!-- Right: Ratio (50%) - Perfect Single Pill -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRatio"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="0.5"
+            android:layout_marginStart="4dp"
+            android:text="Crop"
+            android:textSize="17sp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textColor="?attr/colorOnPrimary"
+            app:icon="@drawable/ic_crop"
+            app:iconSize="24dp"
+            app:iconPadding="16dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp" />
+
+    </LinearLayout>
+
+    <!-- Pretext for Stabilize -->
+    <TextView
+        android:id="@+id/textStabilizePretext"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:layout_marginStart="4dp"
+        android:text="@string/label_auto_align"
+        style="@style/TextAppearance.TimeLapse.HelperSmall" />
+
+    <!-- Split-Button Pill: [ STABILIZE ] [ EDIT MASK ] -->
+    <LinearLayout
+        android:id="@+id/splitPillStabilize"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:layout_marginTop="2dp"
+        android:orientation="horizontal"
+        android:weightSum="10">
+
+        <!-- Left: Stabilize Toggle (80%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnStabilize"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="8"
+            android:layout_marginEnd="4dp"
+            android:text="Stabilize"
+            android:textSize="17sp"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textColor="?attr/colorOnPrimary"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            app:icon="@drawable/ic_stabilize_selector"
+            app:iconSize="24dp"
+            app:iconPadding="16dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+
+        <!-- Right: Edit Mask (20%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnStabilizeMenu"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:layout_marginStart="4dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            android:contentDescription="Edit mask"
+            app:icon="@drawable/ic_edit"
+            app:iconSize="20dp"
+            app:iconPadding="0dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+    </LinearLayout>
+
+</LinearLayout>

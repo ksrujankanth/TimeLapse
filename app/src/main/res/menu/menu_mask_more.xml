@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/menu_auto_play"
+        android:title="Auto-play video"
+        android:checkable="true"
+        android:checked="true" />
+
+    <item
+        android:id="@+id/menu_auto_stabilize"
+        android:title="Auto-enable Stabilizer when masking"
+        android:checkable="true"
+        android:checked="true" />
+
+    <item
+        android:id="@+id/menu_zoom_stabilized"
+        android:title="Zoom stabilized video"
+        android:checkable="true"
+        android:checked="false" />
+
+    <item
+        android:id="@+id/menu_align_to_first"
+        android:title="Align to first frame"
+        android:checkable="true"
+        android:checked="true" />
+
+    <item
+        android:id="@+id/menu_erase_mask"
+        android:title="Erase entire mask" />
+
+    <item
+        android:id="@+id/menu_fill_mask"
+        android:title="Fill entire mask" />
+
+    <item
+        android:id="@+id/menu_invert_mask"
+        android:title="Invert mask" />
+
+    <item
+        android:id="@+id/menu_save_mask"
+        android:title="Save mask" />
+
+</menu>

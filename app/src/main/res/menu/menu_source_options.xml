@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/menu_load_last"
+        android:title="@string/menu_load_last" />
+    <item
+        android:id="@+id/menu_pick_video"
+        android:title="@string/menu_pick_video" />
+    <item
+        android:id="@+id/menu_pick_images"
+        android:title="@string/menu_pick_images" />
+    <item
+        android:id="@+id/menu_pick_folder"
+        android:title="@string/menu_pick_folder" />
+</menu>

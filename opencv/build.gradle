@@ -1,0 +1,64 @@
+// opencv/build.gradle (This is the module-level build file for the 'opencv' library)
+
+apply plugin: 'com.android.library'
+
+android {
+    namespace 'org.opencv'
+    compileSdkVersion 34
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    defaultConfig {
+        minSdkVersion 29
+        targetSdkVersion 34
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            // No specific configuration needed for a typical debug library build
+        }
+    }
+
+    // --- 16KB PAGE ALIGNMENT FOR TENSOR G3 / PIXEL 8 PRO ---
+    // Critical: Tensor G3 requires strict 16KB page alignment for native libraries
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    // --- MODIFIED SECTION ---
+    sourceSets {
+        main {
+            // Explicitly define where your AIDL files are
+            aidl.srcDirs = ['src/main/aidl']
+            // Explicitly define where your Java source files for this module are
+            java.srcDirs = ['src/main/java']
+
+            // Keep this as it dictates how your native code/libraries are handled
+            jni {
+                srcDirs 'src/main/jni' // Assuming C/C++ source for NDK build is here
+            }
+            // If jnilibs contains precompiled .so files, it should be jniLibs (plural 'Libs')
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+
+    buildFeatures {
+        buildConfig = true
+        aidl = true // Explicitly enable AIDL processing
+    }
+    // --- END OF MODIFIED SECTION ---
+}
+
+dependencies {
+    // Typically, an OpenCV library module does not have many external dependencies here
+}
+

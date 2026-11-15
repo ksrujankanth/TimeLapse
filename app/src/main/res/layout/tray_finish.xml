@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    style="@style/Widget.App.Tray">
+
+    <!-- Video Section Header with Resolution Info -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="4dp">
+        
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_video_section_header"
+            android:textAppearance="?attr/textAppearanceHeadline6"
+            android:layout_marginEnd="8dp"/>
+        
+        <TextView
+            android:id="@+id/textVideoHelper"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/helper_resolution"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"/>
+    </LinearLayout>
+
+    <!-- Share Video Split-Button: [ SHARE ] [ SAVE ] [ SETTINGS ] -->
+    <LinearLayout
+        android:id="@+id/splitPillShareVideo"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:weightSum="10">
+
+        <!-- Left: Share (60%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnShareVideo"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="6"
+            android:layout_marginEnd="4dp"
+            android:text="@string/share_video"
+            android:textColor="?attr/colorOnPrimary"
+            android:textSize="17sp"
+            android:gravity="center"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            app:icon="@drawable/ic_share"
+            app:iconSize="20dp"
+            app:iconPadding="16dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+
+        <!-- Center: Save to Gallery (20%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnSaveVideoGallery"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:layout_marginEnd="4dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:gravity="center"
+            android:contentDescription="Save to Gallery"
+            app:icon="@drawable/ic_download"
+            app:iconSize="20dp"
+            app:iconPadding="0dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+
+        <!-- Right: Settings Menu (20%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnVideoSettings"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:layout_marginStart="4dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            android:contentDescription="Video settings"
+            app:icon="@drawable/ic_three_dots"
+            app:iconSize="20dp"
+            app:iconPadding="0dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+    </LinearLayout>
+
+    <!-- Divider -->
+    <com.google.android.material.divider.MaterialDivider
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:layout_marginTop="12dp"
+        android:layout_marginBottom="12dp"/>
+
+    <!-- Image Section Header with Frame Info -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="4dp">
+        
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_image_section_header"
+            android:textAppearance="?attr/textAppearanceHeadline6"
+            android:layout_marginEnd="8dp"/>
+        
+        <TextView
+            android:id="@+id/textImageHelper"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_image_helper_text"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary"/>
+    </LinearLayout>
+
+    <!-- Share Image Split-Button: [ SHARE ] [ SAVE ] [ SETTINGS ] -->
+    <LinearLayout
+        android:id="@+id/splitPillShareImage"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:orientation="horizontal"
+        android:weightSum="10">
+
+        <!-- Left: Share (60%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnShareImage"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="6"
+            android:layout_marginEnd="4dp"
+            android:text="@string/share_image"
+            android:textColor="?attr/colorOnPrimary"
+            android:textSize="17sp"
+            android:gravity="center"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            app:icon="@drawable/ic_share"
+            app:iconSize="20dp"
+            app:iconPadding="8dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+
+        <!-- Center: Save to Gallery (20%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnSaveImageGallery"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:layout_marginEnd="4dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:contentDescription="Save to Gallery"
+            app:icon="@drawable/ic_download"
+            app:iconSize="20dp"
+            app:iconPadding="0dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+
+        <!-- Right: Settings Menu (20%) -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnImageSettings"
+            style="@style/Widget.Material3.Button"
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:layout_marginStart="4dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            android:contentDescription="Image settings"
+            app:icon="@drawable/ic_three_dots"
+            app:iconSize="20dp"
+            app:iconPadding="0dp"
+            app:iconGravity="textStart"
+            app:iconTint="?attr/colorOnPrimary"
+            app:backgroundTint="?attr/colorPrimary"
+            app:cornerRadius="28dp" />
+    </LinearLayout>
+
+    <!-- Hidden Advanced Panel -->
+    <LinearLayout
+        android:id="@+id/panel_advanced_video"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone"
+        android:layout_marginTop="16dp">
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchH265"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_h265_switch" />
+
+        <TextView
+            android:id="@+id/switchH265_sublabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_h265_not_supported"
+            android:visibility="gone"
+            android:textColor="@color/colorError"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/textBitrateLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_bitrate_label"
+            android:layout_marginTop="8dp"
+            android:layout_marginStart="4dp"/>
+        <com.google.android.material.slider.Slider
+            android:id="@+id/slider_bitrate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:valueFrom="1"
+            android:valueTo="100"
+            android:stepSize="1"
+            android:value="50"/>
+
+        <TextView
+            android:id="@+id/textFpsLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/finish_fps_label"
+            android:layout_marginTop="8dp"
+            android:layout_marginStart="4dp"/>
+        <com.google.android.material.slider.Slider
+            android:id="@+id/slider_fps"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:valueFrom="5"
+            android:valueTo="60"
+            android:stepSize="1"
+            android:value="30"/>
+    </LinearLayout>
+
+</LinearLayout>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/menu_h265"
+        android:title="@string/menu_h265"
+        android:checkable="true" />
+    
+    <item
+        android:id="@+id/menu_resolution"
+        android:title="Resolution">
+        <menu>
+            <group android:checkableBehavior="single">
+                <item
+                    android:id="@+id/menu_res_720p"
+                    android:title="720p" />
+                <item
+                    android:id="@+id/menu_res_1080p"
+                    android:title="1080p" />
+                <item
+                    android:id="@+id/menu_res_4k"
+                    android:title="4K" />
+            </group>
+        </menu>
+    </item>
+</menu>

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="80dp">
+
+        <LinearLayout
+            android:id="@+id/no_media_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            app:layout_constraintTop_toTopOf="parent">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Add Media"
+                android:textAppearance="?attr/textAppearanceTitleLarge"
+                android:layout_marginBottom="16dp"/>
+
+            <TextView
+                android:id="@+id/label_recents"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Recent Folders"
+                android:textAppearance="?attr/textAppearanceLabelLarge"
+                android:layout_marginBottom="8dp"/>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/recyclerRecentFolders"
+                android:layout_width="match_parent"
+                android:layout_height="80dp"
+                android:layout_marginBottom="16dp"
+                android:orientation="horizontal"
+                app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_add_video"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Open Video File"
+                android:textAlignment="viewStart"
+                app:icon="@android:drawable/ic_menu_slideshow" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_add_images"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Select Images"
+                android:textAlignment="viewStart"
+                app:icon="@android:drawable/ic_menu_gallery" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_add_folder"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Open Image Folder"
+                android:textAlignment="viewStart"
+                app:icon="@drawable/ic_folder_outline" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/layout_loaded_controls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            app:layout_constraintTop_toBottomOf="@id/no_media_container"
+            android:layout_marginTop="16dp">
+
+            <com.google.android.material.slider.RangeSlider
+                android:id="@+id/rangeSliderDuration"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:valueFrom="1.0"
+                android:valueTo="100.0"
+                app:values="@array/initial_range_values"/>
+
+            <TextView
+                android:id="@+id/label_trim"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Select range to trim"
+                android:textAlignment="center"
+                android:textAppearance="?attr/textAppearanceLabelMedium"
+                android:alpha="0.6"
+                android:layout_marginTop="-8dp"
+                android:layout_marginBottom="24dp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_change_media"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Change Media"
+                app:icon="@android:drawable/ic_menu_edit" />
+
+        </LinearLayout>
+    </androidx.constraintlayout.widget.ConstraintLayout>
+</layout>
