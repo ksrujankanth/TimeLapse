@@ -8,7 +8,7 @@ Version 3.0 is a major update to the UI and screens. The old single-screen layou
 
 ## Download
 
-The APK is on the [releases page](https://github.com/ksrujankanth/TimeLapse/releases/latest). Download it on the phone and open it, Android will ask you to allow installing from your browser or file manager.
+The APK is on the [releases page](https://github.com/ksrujankanth/TimeLapse/releases/latest). Download it on the phone and open it. Android will ask you to allow installing from your browser or file manager.
 
 Requirements: Android 10 (API 29) or newer, arm64 or armeabi-v7a.
 
@@ -18,35 +18,29 @@ The same page has the source archive as a zip or tar.gz. Build it with Android S
 
 The GIF shows a raw frame and the same clip after an average stack. The moving water smooths out and the noise drops.
 
-## Effects
+<p>
+  <img src="screenshots/03-effects.jpg" width="49%" alt="Effects list">
+  <img src="screenshots/05-save-export.jpg" width="49%" alt="Save screen">
+</p>
 
-![Effects list](screenshots/03-effects.jpg)
+**Effects** — average stack, motion blur, light trails, lighten average, long exposure (sum), HDR, median cleanup, motion extraction, transition, super resolution. Pick one, set the stack length, and apply it.
 
-The effects list includes average stack, motion blur, light trails, long exposure, HDR, median cleanup, motion extraction, transition, and super resolution. Pick one, set the stack length, and apply it.
+**Save** — export the rendered video or save and share the current frame as an image. FPS, bitrate, and H.265 are available when the device supports them.
 
-## Save
+<p>
+  <img src="screenshots/07-rendering.jpg" width="49%" alt="Rendering progress">
+  <img src="screenshots/06-empty-state.jpg" width="49%" alt="Media screen">
+</p>
 
-![Save screen](screenshots/05-save-export.jpg)
+**Rendering** — live progress with frame counts, cancellable at any time.
 
-Save or share the rendered video, or save the current frame as an image. FPS, bitrate, and H.265 are available when the device supports them.
+**Media** — load a video, an image sequence, or a folder. The last source can be reopened from the same screen.
 
-## Rendering
+<p align="center">
+  <img src="screenshots/04-mask-editor.jpg" width="49%" alt="Mask editor">
+</p>
 
-![Rendering progress](screenshots/07-rendering.jpg)
-
-Rendering shows the frame count and can be cancelled.
-
-## Media
-
-![Media screen](screenshots/06-empty-state.jpg)
-
-Load a video, an image sequence, or a folder. The last source can be reopened from the same screen.
-
-## Mask editor
-
-![Mask editor](screenshots/04-mask-editor.jpg)
-
-Draw over the subject you want to keep still. The mask is used during stabilization.
+**Mask editor** — draw over the subject you want to keep still. The mask is used during stabilization.
 
 ## Build
 
@@ -55,6 +49,8 @@ Open the project in Android Studio, or run:
     gradlew.bat assembleDebug
 
 Android SDK 34 and NDK 26.1 are required. The OpenCV module is included in the repo.
+
+For a signed release build, create a `keystore.properties` file in the project root (see `.gitignore` for the expected format) and run `gradlew.bat assembleRelease`.
 
 ## License and credits
 

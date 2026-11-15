@@ -1,20 +1,54 @@
 *.iml
 .gradle
 /local.properties
-/.idea/
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+/.idea/vcs.xml
+/.idea/codeStyles/*
 .DS_Store
 /build
 /captures
 .externalNativeBuild
 .cxx
 local.properties
+/app/keystore.config
+/app/release/output-metadata.json
+/app/release/app-release.apk
+/opencv/build
 /app/release/
+
+# Gradle/AGP native-prefab extraction dir (recreated on every build; it held a
+# ~130 MB duplicate of opencv's .so files before 4605d38 deleted it). Never commit.
 /prefab_temp/
+
+# IDE config (tracked by accident until 2026-10-28 cleanup)
+/.idea/
+
+# Demo images removed from tree; retrievable from history if ever needed
+/examples/
+
+# Machine-specific prompt dumps
+prompts_timelap_*.txt
+
+# Private Signing Keys
+keystore.config
+keystore.properties
+*.jks
+*.keystore
+
+
+# Build artifacts
 **/build/
 **/output-metadata.json
 *.apk
 *.ap_
 *.dex
-keystore.config
-*.jks
-*.keystore
+
+
+
+
+.grepai/
