@@ -1,18 +1,16 @@
 # TimeLapse
 
-Create high-quality timelapse videos from existing videos or a series of photos (sorted alphabetically). The app blends frames over time, stabilizes shaky footage, and exports the result as a video or a still image.
+Create high-quality timelapse videos from existing videos or a series of photos. The app helps blend frames over time, stabilize shaky footage, and exports the result as a video or a still image.
 
 In plain terms: an effect is applied across a span of N frames at once, not to each frame on its own. That is what smooths moving water, cuts noise, and gives the long-exposure look.
 
-Version 3.0 is a major update to the UI and screens. The old single-screen layout is now four tabs: Media, Adjust, Effects, and Save.
+Version 3.0 is a major update to the UI and screens. The old single-screen layout is now four tabs: Media, Adjust, Effects and Save.
 
 ## Download
 
 The APK is on the [releases page](https://github.com/ksrujankanth/TimeLapse/releases/latest). Download it on the phone and open it. Android will ask you to allow installing from your browser or file manager.
 
 Requirements: Android 10 (API 29) or newer, arm64 or armeabi-v7a.
-
-The same page has the source archive as a zip or tar.gz. Build it with Android Studio if you want to compile it yourself.
 
 ![Raw frame to average stack](screenshots/before-after.gif)
 
@@ -49,8 +47,6 @@ Open the project in Android Studio, or run:
     gradlew.bat assembleDebug
 
 Android SDK 34 and NDK 26.1 are required. The OpenCV module is included in the repo.
-
-For a signed release build, create a `keystore.properties` file in the project root (see `.gitignore` for the expected format) and run `gradlew.bat assembleRelease`.
 
 ## License and credits
 
