@@ -7006,7 +7006,11 @@ public class Imgproc {
      * SEE: REF: imgproc_color_conversions
      */
     public static void cvtColor(Mat src, Mat dst, int code, int dstCn) {
-        cvtColor_0(src.nativeObj, dst.nativeObj, code, dstCn);
+        // Bind to the native 4-argument entry point. See the note on the native
+        // declarations below — the overload numbering in this file does NOT match
+        // the index in the shipped libopencv_java4.so, which shifted when OpenCV
+        // added an AlgorithmHint parameter to cv::cvtColor.
+        cvtColor_1(src.nativeObj, dst.nativeObj, code, dstCn);
     }
 
     /**
@@ -7059,7 +7063,7 @@ public class Imgproc {
      * SEE: REF: imgproc_color_conversions
      */
     public static void cvtColor(Mat src, Mat dst, int code) {
-        cvtColor_1(src.nativeObj, dst.nativeObj, code);
+        cvtColor_2(src.nativeObj, dst.nativeObj, code);
     }
 
 
@@ -9926,8 +9930,21 @@ public static Size getTextSize(String text, int fontFace, double fontScale, int 
     private static native void blendLinear_0(long src1_nativeObj, long src2_nativeObj, long weights1_nativeObj, long weights2_nativeObj, long dst_nativeObj);
 
     // C++:  void cv::cvtColor(Mat src, Mat& dst, int code, int dstCn = 0)
-    private static native void cvtColor_0(long src_nativeObj, long dst_nativeObj, int code, int dstCn);
-    private static native void cvtColor_1(long src_nativeObj, long dst_nativeObj, int code);
+    //
+    // ARITY IS PINNED TO THE SHIPPED libopencv_java4.so, NOT TO THIS FILE'S HISTORY.
+    // That .so was generated from a newer OpenCV in which cv::cvtColor gained an
+    // AlgorithmHint parameter, so its Java overloads are:
+    //     Java cvtColor(src,dst,code,dcn) -> native cvtColor_11 (reads  code, dcn)
+    //     Java cvtColor(src,dst,code)     -> native cvtColor_12 (reads  code only)
+    //     (native cvtColor_10 is the 5-argument src,dst,code,dcn,hint variant)
+    // The old declarations here were shifted by one: the 3-arg method pointed at a
+    // 4-arg native, so OpenCV read whatever happened to be in the 5th argument
+    // register as the output channel count and threw
+    //     "Bad number of channels ... 'dcn' is <garbage>"
+    // for perfectly valid conversions, intermittently, depending on the call site.
+    // If libopencv_java4.so is ever replaced, re-check these two arities against it.
+    private static native void cvtColor_1(long src_nativeObj, long dst_nativeObj, int code, int dstCn);
+    private static native void cvtColor_2(long src_nativeObj, long dst_nativeObj, int code);
 
     // C++:  void cv::cvtColorTwoPlane(Mat src1, Mat src2, Mat& dst, int code)
     private static native void cvtColorTwoPlane_0(long src1_nativeObj, long src2_nativeObj, long dst_nativeObj, int code);

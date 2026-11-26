@@ -143,12 +143,13 @@ class VideoFramesInput(private val _uriFile: UriFile) : FramesInput() {
         return getFrame(0) ?: Mat()
     }
 
-    override fun forEachFrame(start: Int, progress: (Int, Int) -> Unit, callback: (Int, Int, Mat) -> Boolean) {
+    override fun forEachFrame(start: Int, step: Int, progress: (Int, Int) -> Unit, callback: (Int, Int, Mat) -> Boolean) {
         val videoCapture = openVideoCapture()
         if (!videoCapture.isOpened) {
             Log.e(TAG, "forEachFrame: Failed to open video capture.")
             return
         }
+        val stride = step.coerceAtLeast(1)
 
         try {
             videoCapture.set(Videoio.CAP_PROP_CONVERT_RGB, 1.0)
@@ -166,6 +167,19 @@ class VideoFramesInput(private val _uriFile: UriFile) : FramesInput() {
             var counter = start
             val totalFramesToProcess = (_size - start).coerceAtLeast(0)
             while (counter < _size) {
+
+                // Input speed: advance the decoder without colour-converting and
+                // copying the frame. read() is grab() + retrieve(), so dropping
+                // the retrieve makes a 60x timelapse far cheaper than decoding
+                // every source frame and throwing 59 of them away. The 1 ms
+                // throttle stays on DELIVERED frames only, otherwise it alone
+                // would cost one second per 1000 skipped source frames.
+                if (stride > 1 && (counter - start) % stride != 0) {
+                    videoCapture.grab()
+                    counter++
+                    continue
+                }
+
                 try { Thread.sleep(1) } catch (_: InterruptedException) {}
                 
                 val rawFrame = Mat()

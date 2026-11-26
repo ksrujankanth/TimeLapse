@@ -42,4 +42,7 @@ abstract class MultiFramesFilter(private val size: Int, private val notifyOnPart
         if (nextWindow == 0) return 0
         return size + nextWindow - 1
     }
+
+    /** The stack must hold [size] frames before the first output is emitted. */
+    override val stackingWindowFrames: Int get() = size
 }

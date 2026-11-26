@@ -6,6 +6,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
+import android.os.Looper
 import android.provider.MediaStore
 import androidx.documentfile.provider.DocumentFile
 import android.util.Log
@@ -22,6 +23,7 @@ import com.dan.timelapse.framesinput.ImagesFramesInput
 import com.dan.timelapse.framesinput.VideoFramesInput
 import com.dan.timelapse.utils.OutputParams
 import com.dan.timelapse.utils.Settings
+import com.dan.timelapse.utils.InputSpeed
 import com.dan.timelapse.utils.HardwareUtils
 import com.dan.timelapse.utils.getJvmUsedMemoryMB
 import com.dan.timelapse.utils.getJvmMaxMemoryMB
@@ -101,6 +103,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     // ===== New Persistence State Variables =====
     private val _lastSourceType = MutableLiveData(SourceType.VIDEO)
     val lastSourceType: LiveData<SourceType> = _lastSourceType
+
+    /**
+     * True once a share-sheet payload has been consumed. A configuration change recreates the
+     * activity with the SAME launch intent; without this flag the share would be replayed over
+     * whatever the user has chosen since.
+     */
+    var shareIntentConsumed: Boolean = false
+
+    /**
+     * Child URIs of a restored multi-select IMAGES session. Empty for folders and for
+     * single picks, where [lastMediaUri] is enough.
+     */
+    private val _lastMediaUris = MutableLiveData<List<Uri>>(emptyList())
+    val lastMediaUris: LiveData<List<Uri>> = _lastMediaUris
     
     private val _lastCodec = MutableLiveData(Codec.H264)
     val lastCodec: LiveData<Codec> = _lastCodec
@@ -124,20 +140,84 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _trimEnd = MutableLiveData(Int.MAX_VALUE)
     val trimEnd: LiveData<Int> = _trimEnd
     
-    // Selected frame position for image export (in milliseconds)
+    // Selected frame for image export, always a 0-based source frame index.
     private val _selectedFramePositionMs = MutableLiveData<Long?>(null)
     val selectedFramePositionMs: LiveData<Long?> = _selectedFramePositionMs
-    
-    fun setSelectedFramePosition(positionMs: Long) {
-        _selectedFramePositionMs.value = positionMs
-    }
-    
+
     fun clearSelectedFramePosition() {
         _selectedFramePositionMs.value = null
+    }
+
+    /**
+     * The frame picker always stores a 0-based index into the ORIGINAL source,
+     * regardless of whether it was driven by source frames or by a rendered
+     * preview. That removes every index-vs-milliseconds ambiguity after a
+     * render. Use [setSelectedFrameFromPicker] to write it.
+     */
+    fun resolveSelectedSourceFrameIndex(): Int? {
+        val input = framesInput.value ?: return null
+        val position = _selectedFramePositionMs.value ?: return null
+        return position.toInt().coerceIn(0, (input.size - 1).coerceAtLeast(0))
+    }
+
+    /** True when the picker slider is showing a rendered video timeline (milliseconds). */
+    private fun pickerUsesRenderedTimeline(): Boolean {
+        val input = framesInput.value ?: return false
+        return _processedVideoUri.value != null &&
+            input !is com.dan.timelapse.framesinput.ImagesFramesInput
+    }
+
+    /**
+     * Source frames per rendered frame. MUST match VideoProcessor's decimation:
+     * every effect decimates except Super Resolution, which needs every frame for
+     * sub-pixel coverage. If these two disagree, the seekbar maps the rendered
+     * timeline onto the wrong source frames.
+     */
+    private fun pickerSkipFrames(): Int =
+        InputSpeed.strideFor(_visualEffect.value ?: Effect.NONE, _skipFrames.value ?: 1)
+
+    /** False when the current effect ignores input speed (Super Resolution). */
+    fun isInputSpeedApplicable(): Boolean =
+        InputSpeed.strideFor(_visualEffect.value ?: Effect.NONE, 2) > 1
+
+    /**
+     * Store a picker value. Millisecond values from a rendered timeline are
+     * converted back to a source frame index.
+     */
+    fun setSelectedFrameFromPicker(value: Long) {
+        val input = framesInput.value
+        if (input == null) {
+            _selectedFramePositionMs.value = value
+            return
+        }
+        val lastIndex = (input.size - 1).coerceAtLeast(0)
+        val sourceIndex = if (pickerUsesRenderedTimeline()) {
+            val outFps = (_outputFps.value ?: _previewFps.value ?: 30).coerceAtLeast(1)
+            val renderedFrame = ((value / 1000.0) * outFps).toInt()
+            val startFrame = (_trimStart.value ?: 0).coerceAtLeast(0)
+            startFrame + renderedFrame * pickerSkipFrames()
+        } else {
+            value.toInt()
+        }
+        _selectedFramePositionMs.value = sourceIndex.coerceIn(0, lastIndex).toLong()
+    }
+
+    /**
+     * Inverse of [setSelectedFrameFromPicker]: the position in milliseconds on
+     * the currently rendered preview that corresponds to a source frame.
+     */
+    fun renderedPositionMsForSourceFrame(sourceIndex: Int): Long {
+        if (!pickerUsesRenderedTimeline()) return sourceIndex.toLong()
+        val startFrame = (_trimStart.value ?: 0).coerceAtLeast(0)
+        val renderedFrame = ((sourceIndex - startFrame).coerceAtLeast(0)) / pickerSkipFrames()
+        val outFps = (_outputFps.value ?: _previewFps.value ?: 30).coerceAtLeast(1)
+        return renderedFrame.toLong() * 1000L / outFps
     }
     
     private val _autoSaveAfterRender = MutableLiveData(false)
     val autoSaveAfterRender: LiveData<Boolean> = _autoSaveAfterRender
+
+    private var suppressAutoSaveOnce = false
 
     // ===== Render Valid Check =====
     private var _lastRenderConfig: String = ""
@@ -167,9 +247,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val w = if (rotation == 90 || rotation == 270) originalH else originalW
         val h = if (rotation == 90 || rotation == 270) originalW else originalH
 
-        // Enforce safe memory boundaries based on resolution settings
+        // Enforce safe memory boundaries based on resolution settings.
+        // The cap applies to the LONG edge so portrait sources work too.
         val resSetting = _resolution.value ?: com.dan.timelapse.utils.Settings.RES_1080P
-        val maxDim = if (resSetting == com.dan.timelapse.utils.Settings.RES_4K) 3840 else 1920
+        val maxDim = when (resSetting) {
+            com.dan.timelapse.utils.Settings.RES_720P -> 1280
+            com.dan.timelapse.utils.Settings.RES_4K -> 3840
+            else -> 1920
+        }
 
         // If already smaller than target, keep original
         if (w <= maxDim && h <= maxDim) return Pair(w, h)
@@ -230,26 +315,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * This is the single source of truth for time remaining.
      */
     fun updateEstimatedTimeRemaining(remainingMs: Long) {
-        if (remainingMs < 0) {
-            _estimatedTimeRemaining.postValue("Calculating...")
-        } else {
-            _estimatedTimeRemaining.postValue(formatTimeRemaining(remainingMs))
-        }
-    }
-    
-    private fun formatTimeRemaining(ms: Long): String {
-        val totalSeconds = ((ms + 500) / 1000).coerceAtLeast(0) // Round, don't inflate
-        if (totalSeconds == 0L) return "Almost done"
-        
-        val hours = totalSeconds / 3600
-        val minutes = (totalSeconds % 3600) / 60
-        val seconds = totalSeconds % 60
-        
-        return buildString {
-            if (hours > 0) append("${hours}h ")
-            if (minutes > 0) append("${minutes}m ")
-            if (hours == 0L) append("${seconds}s") // Only show seconds if under 1 hour
-        }.trim()
+        _estimatedTimeRemaining.postValue(com.dan.timelapse.eta.EtaFormat.format(remainingMs))
     }
     
     fun cancelProcessing() {
@@ -257,86 +323,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     
     fun resetProcessingState() {
-        _isProcessingCancelled.value = false
-        _processingProgress.value = Pair(0, 0)
-        _estimatedTimeRemaining.value = ""
-        _processingStatusText.value = ""
-    }
-
-    // ── MFSR Phase Timing Cache (keyed by resolution, e.g. "1920x1080") ──
-    data class MfsrPhaseTiming(
-        val scanMs: Double = 0.0,
-        val matricesMs: Double = 0.0,
-        val accumulateMs: Double = 0.0,
-        val finalizeMs: Double = 0.0,
-        val sampleCount: Int = 0
-    )
-
-    private val mfsrEtaCache = mutableMapOf<String, MfsrPhaseTiming>()
-
-    fun updateMfsrEtaCache(key: String, scanMs: Long, matricesMs: Long, accumulateMs: Long, finalizeMs: Long) {
-        val existing = mfsrEtaCache[key]
-        val n = (existing?.sampleCount ?: 0) + 1
-        val alpha = 1.0 / n
-        mfsrEtaCache[key] = MfsrPhaseTiming(
-            scanMs       = if (existing != null) existing.scanMs * (1 - alpha) + scanMs * alpha       else scanMs.toDouble(),
-            matricesMs   = if (existing != null) existing.matricesMs * (1 - alpha) + matricesMs * alpha   else matricesMs.toDouble(),
-            accumulateMs = if (existing != null) existing.accumulateMs * (1 - alpha) + accumulateMs * alpha else accumulateMs.toDouble(),
-            finalizeMs   = if (existing != null) existing.finalizeMs * (1 - alpha) + finalizeMs * alpha   else finalizeMs.toDouble(),
-            sampleCount  = n
-        )
-        // Persist cache after update
-        try {
-            saveMfsrEtaCache(getApplication())
-        } catch (e: Exception) {
-            // Ignore if context not available
+        // Callable from BOTH threads. MainActivity.clearSavedSession() runs inside
+        // lifecycleScope.launch(Dispatchers.IO) on the stale-session paths, and
+        // LiveData.setValue throws "Cannot invoke setValue on a background thread".
+        // The startup path swallowed that into a bogus "Auto-load failed" ERROR and
+        // cleared twice; onOpenLastSelection's catch bodies let it escape and crashed.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            _isProcessingCancelled.value = false
+            _processingProgress.value = Pair(0, 0)
+            _estimatedTimeRemaining.value = ""
+            _processingStatusText.value = ""
+        } else {
+            _isProcessingCancelled.postValue(false)
+            _processingProgress.postValue(Pair(0, 0))
+            _estimatedTimeRemaining.postValue("")
+            _processingStatusText.postValue("")
         }
     }
 
-    fun getMfsrEtaCache(key: String): MfsrPhaseTiming? = mfsrEtaCache[key]
-
-    fun saveMfsrEtaCache(context: Context) {
-        try {
-            val prefs = context.getSharedPreferences("eta_learning_cache", Context.MODE_PRIVATE)
-            val editor = prefs.edit()
-            for ((key, timing) in mfsrEtaCache) {
-                val value = "${timing.scanMs},${timing.matricesMs},${timing.accumulateMs},${timing.finalizeMs},${timing.sampleCount}"
-                editor.putString("mfsr_$key", value)
-            }
-            editor.apply()
-        } catch (e: Exception) {
-            Log.w("TimeLapse", "Failed to save MFSR ETA cache", e)
-        }
-    }
+    // ── Legacy MFSR ETA cache (removed) ─────────────────────────────────
+    // The per-phase cache that used to live here was replaced by the learned
+    // model in com.dan.timelapse.eta. Its keys ignored the render scale, it
+    // predicted matrices/accumulate from the whole clip instead of the selected
+    // frames, and it divided frames by milliseconds when applying the scan
+    // correction. Do not reintroduce a second estimator: one model, one place.
 
     fun loadMfsrEtaCache(context: Context) {
-        try {
-            val prefs = context.getSharedPreferences("eta_learning_cache", Context.MODE_PRIVATE)
-            mfsrEtaCache.clear()
-            for ((key, value) in prefs.all) {
-                if (key.startsWith("mfsr_") && value is String) {
-                    val cacheKey = key.substring(5) // Remove "mfsr_" prefix
-                    val parts = value.split(",")
-                    if (parts.size == 5) {
-                        try {
-                            val timing = MfsrPhaseTiming(
-                                scanMs = parts[0].toDouble(),
-                                matricesMs = parts[1].toDouble(),
-                                accumulateMs = parts[2].toDouble(),
-                                finalizeMs = parts[3].toDouble(),
-                                sampleCount = parts[4].toInt()
-                            )
-                            mfsrEtaCache[cacheKey] = timing
-                        } catch (e: Exception) {
-                            // Skip invalid entry
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w("TimeLapse", "Failed to load MFSR ETA cache", e)
-        }
+        Log.d("TimeLapse", "Legacy MFSR ETA cache ignored; using learned EtaEngine")
     }
+
 
     fun getZoomAdjustedRadius(): Float {
         val scale = _previewTransform.value?.scale ?: 1.0f
@@ -377,15 +392,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isStabilized: LiveData<Boolean> = _isStabilized
 
     // Alignment strategy: true = align to first frame, false = sequential (frame-to-frame)
-    private val _alignToFirstFrame = MutableLiveData(true)
+    // Default is SMOOTH mode (alignToFirstFrame = false). On a real panning clip
+    // anchor mode measured jitter_rms 1.07 vs 0.70 for the unstabilized source — it
+    // pins the pan, then pops when the pan reaches the crop clamp — while smooth
+    // removes the jitter and keeps the pan. "Lock to first frame" remains available
+    // for tripods via the mask editor's More menu.
+    private val _alignToFirstFrame = MutableLiveData(false)
     val alignToFirstFrame: LiveData<Boolean> = _alignToFirstFrame
 
     // Stabilization zoom factor: 1.0 = keep original, >1.0 = auto-crop black borders
-    private val _stabilizationZoom = MutableLiveData(1.0f)
+    // Maximum auto-crop the stabilizer may use, as a zoom factor.
+    // 1.0 = never crop (black/replicated edges are possible), 1.10 = 10%.
+    private val _stabilizationZoom = MutableLiveData(1.05f)
     val stabilizationZoom: LiveData<Float> = _stabilizationZoom
 
-    // Stabilization smoothing window size (frames): higher = more smoothing, more lag
-    private val _stabilizationSmoothing = MutableLiveData(30)
+    // Smoothing window in frames. Sigma = window / 6, and the filter is
+    // zero-phase, so this controls strength only, never lag.
+    private val _stabilizationSmoothing = MutableLiveData(60)
     val stabilizationSmoothing: LiveData<Int> = _stabilizationSmoothing
 
     // Auto-enable stabilization when drawing a mask
@@ -492,7 +515,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isH265Supported = MutableLiveData(false)
     val isH265Supported: LiveData<Boolean> = _isH265Supported
 
-    private val _fileQuality = MutableLiveData(7)
+    private val _fileQuality = MutableLiveData(50)
     val fileQuality: LiveData<Int> = _fileQuality
 
     private val _outputFps = MutableLiveData(30)
@@ -528,6 +551,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _lastProcessedParams = params
         _isSaveReady.value = params != null
     }
+
+    /** Explicitly enable/disable Save/Share (e.g. after a cancelled render). */
+    fun setSaveReady(ready: Boolean) {
+        _isSaveReady.value = ready
+    }
     
     // ===== Trim Helpers for Trim-Sync =====
     fun getTrimStartMs(): Long = _trimStartMs.value ?: 0L
@@ -554,6 +582,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     
     fun setAutoSaveAfterRender(autoSave: Boolean) {
         _autoSaveAfterRender.value = autoSave
+        // Persist straight away. The switch lives in a bottom sheet and only onPause used
+        // to write the session, so a force-stop could silently revert the user's choice.
+        if (framesInput.value != null) {
+            try {
+                saveSession(getApplication())
+            } catch (_: Exception) {
+                // Never let a persistence hiccup break the toggle itself.
+            }
+        }
     }
 
     private fun gcd(a: Int, b: Int): Int {
@@ -584,9 +621,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isEndless.value = false
             _visualEffect.value = Effect.NONE
             _frameBlending.value = minOf(10, input.size).coerceAtLeast(2)
+
+            // A frame picked for the previous media must never leak into the new one.
+            _selectedFramePositionMs.value = null
             
             // FIX 4: Reset skipFrames to 1 for new media
             _skipFrames.value = 1
+            // ...and reset the visible speed with it. These two used to diverge:
+            // the summary kept saying "60x" while the render silently used 1x.
+            _speedMultiplier.value = 1
             
             // Set default preview FPS based on input type
             val defaultPreviewFps = when (input) {
@@ -631,7 +674,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
 
-            if (input.width < 3840 && _resolution.value == Settings.RES_4K) {
+            if (maxOf(input.width, input.height) < 3840 && _resolution.value == Settings.RES_4K) {
                 _resolution.value = Settings.RES_1080P
             }
 
@@ -643,9 +686,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _firstFrame.value = null
             _firstFrameMask.value = null
             _trimRange.value = Pair(1f, 100.0f)
+            _selectedFramePositionMs.value = null
         }
         setLastProcessedParams(null)
         _processedVideoUri.value = null
+        _processedImageUri.value = null
+        experimentalRefinedUri = null
+        pendingFullResAction = null
     }
 
     fun getFormattedExportName(extension: String): String {
@@ -672,6 +719,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _processedImageUri.value = uri
     }
 
+    /**
+     * Local file backing the currently displayed rendered image (MFSR output or a
+     * full-res still). Used by Save/Share so they copy the real rendered pixels
+     * instead of the downscaled preview bitmap.
+     */
+    fun getProcessedImageFile(): File? {
+        val uri = _processedImageUri.value ?: return null
+        val path = uri.path ?: return null
+        val file = File(path)
+        return if (file.exists() && file.length() > 0) file else null
+    }
+
     private fun getUniqueFile(folder: File, baseName: String, extension: String): File {
         var file = File(folder, "$baseName.$extension")
         var counter = 1
@@ -688,6 +747,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _toastMessage.value = "Error: No file to save."
             return
         }
+        // Safety net: MFSR produces a JPEG. Never mux those bytes into the video collection.
+        if (!filePath.endsWith(".mp4", ignoreCase = true)) {
+            _toastMessage.value = "Error: current render is not a video."
+            return
+        }
 
         // Strip extension from baseName if present
         val baseName = baseNameWithExt.substringBeforeLast(".")
@@ -700,6 +764,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val sourceFile = File(safeFilePath)
                 if (!sourceFile.exists()) {
                     withContext(Dispatchers.Main) { _toastMessage.value = "Error: Rendered file missing" }
+                    return@launch
+                }
+
+                // A one-frame MP4 reports a 0 ms duration: it is a corrupt entry in
+                // every gallery and player. The renderer already refuses to publish
+                // one, but Save/Share on the Finish screen can point at a stale or
+                // partial file, so the last write before MediaStore re-checks.
+                val sourceDurationMs = videoDurationMs(sourceFile)
+                if (sourceDurationMs != null && sourceDurationMs <= 0L) {
+                    Log.w("MainViewModel", "Refusing to save 0 ms video ${sourceFile.name}")
+                    withContext(Dispatchers.Main) {
+                        _toastMessage.value = "Not saved: this video has no playable frames."
+                    }
                     return@launch
                 }
 
@@ -722,9 +799,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fileUri?.let { uri ->
                     var isSuccess = false
                     try {
-                        contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        val outputStream = contentResolver.openOutputStream(uri)
+                            ?: throw java.io.IOException("MediaStore returned no output stream")
+                        outputStream.use { out ->
                             sourceFile.inputStream().use { inputStream ->
-                                inputStream.copyTo(outputStream)
+                                inputStream.copyTo(out)
                             }
                         }
 
@@ -732,7 +811,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         values.put(MediaStore.Video.Media.IS_PENDING, 0)
                         contentResolver.update(uri, values, null, null)
                         isSuccess = true
-                        _scanFileEvent.postValue(safeFilePath)
+                        // The MediaStore row is already live; scanning the cache copy again
+                        // would import a duplicate video into the gallery.
                         withContext(Dispatchers.Main) { _toastMessage.value = "Video saved to Movies/TimeLapse" }
                     } catch (e: Exception) {
                         throw e
@@ -784,6 +864,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             candidate = "${baseName}_${String.format("%02d", counter)}.$extension"
         }
     }
+
+    /** Container duration in ms, or null when the file cannot be probed. */
+    private fun videoDurationMs(file: File): Long? {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            retriever.extractMetadata(
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull()
+        } catch (e: Exception) {
+            Log.w("MainViewModel", "Could not read duration of ${file.name}", e)
+            null
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
     
     fun saveImageToGallery(bitmap: Bitmap, baseNameWithExt: String) {
         // Strip extension from baseName if present
@@ -810,8 +906,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fileUri?.let { uri ->
                     var isSuccess = false
                     try {
-                        contentResolver.openOutputStream(uri)?.use { outputStream ->
-                            bitmap.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
+                        val outputStream = contentResolver.openOutputStream(uri)
+                            ?: throw java.io.IOException("MediaStore returned no output stream")
+                        outputStream.use { out ->
+                            bitmap.compress(Bitmap.CompressFormat.JPEG, 100, out)
                         }
 
                         values.clear()
@@ -848,11 +946,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (!sourceFile.exists()) return@launch
                 
                 val contentResolver = getApplication<Application>().contentResolver
-                val uniqueFileName = getUniqueFileName(contentResolver, baseName, "jpg")
+                // Preserve the source format: a PNG from a 16-bit TIFF/PNG sequence must
+                // not be registered as JPEG, or the extra precision is thrown away and
+                // some viewers refuse it.
+                val extension = sourceFile.extension.lowercase().ifBlank { "jpg" }
+                val mimeType = if (extension == "png") "image/png" else "image/jpeg"
+                val uniqueFileName = getUniqueFileName(contentResolver, baseName, extension)
                 
                 val values = ContentValues().apply {
                     put(MediaStore.Images.Media.DISPLAY_NAME, uniqueFileName)
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(MediaStore.Images.Media.MIME_TYPE, mimeType)
                     put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/TimeLapse")
                     put(MediaStore.Images.Media.IS_PENDING, 1)
                 }
@@ -864,9 +967,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 fileUri?.let { uri ->
                     var isSuccess = false
                     try {
-                        contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        val outputStream = contentResolver.openOutputStream(uri)
+                            ?: throw java.io.IOException("MediaStore returned no output stream")
+                        outputStream.use { out ->
                             sourceFile.inputStream().use { inputStream ->
-                                inputStream.copyTo(outputStream)
+                                inputStream.copyTo(out)
                             }
                         }
 
@@ -1038,14 +1143,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _alignToFirstFrame.value = !(_alignToFirstFrame.value ?: true)
     }
 
+    fun setAlignToFirstFrame(align: Boolean) {
+        _alignToFirstFrame.value = align
+    }
+
+    fun setStabilizationSmoothing(window: Int) {
+        // 5..200 frames. 30 = light, 60 = medium, 120 = strong.
+        _stabilizationSmoothing.value = window.coerceIn(5, 200)
+    }
+
     fun setStabilizationZoom(zoom: Float) {
+        // Interpreted as the maximum auto-crop: 1.0 (none) .. 1.10 (10%).
         _stabilizationZoom.value = zoom.coerceIn(1.0f, 1.1f)
     }
 
+    /** @param percent 0, 5 or 10 */
+    fun setStabilizationCropPercent(percent: Int) {
+        _stabilizationZoom.value = 1.0f + percent.coerceIn(0, 10) / 100.0f
+    }
+
     fun toggleStabilizationZoom() {
-        // Toggle between 1.0 (keep black borders) and 1.1 (auto-crop)
-        val current = _stabilizationZoom.value ?: 1.0f
-        _stabilizationZoom.value = if (current < 1.05f) 1.1f else 1.0f
+        // Retained for the existing mask menu: cycles 5% -> 10% -> off.
+        val current = _stabilizationZoom.value ?: 1.05f
+        _stabilizationZoom.value = when {
+            current < 1.02f -> 1.05f
+            current < 1.08f -> 1.10f
+            else -> 1.0f
+        }
     }
 
     fun setPreviewTransform(scale: Float, tx: Float, ty: Float) {
@@ -1124,8 +1248,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setPreviewFps(fps: Int) { _previewFps.value = fps }
     fun setFrameDuration(ms: Int) { _frameDuration.value = ms }
 
-    fun triggerStudioProcess() {
+    fun triggerStudioProcess(suppressAutoSave: Boolean = false) {
+        suppressAutoSaveOnce = suppressAutoSave
         _triggerStudioProcess.value = Unit
+    }
+
+    fun consumeAutoSaveSuppression(): Boolean {
+        val suppressed = suppressAutoSaveOnce
+        suppressAutoSaveOnce = false
+        return suppressed
     }
 
     fun setResolution(res: Int) { _resolution.value = res }
@@ -1177,21 +1308,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val PREFS_NAME = "TimeLapsePrefs"
     private val SESSION_STATE_KEY = "session_state_json"
 
+    /**
+     * Keys written by the pre-3.0 session format. They belong to the session, not to
+     * the user's data, so they are removed together with [SESSION_STATE_KEY] — but
+     * the per-URI trim memory (`trim_start_<hash>` / `trim_end_<hash>`) is NOT.
+     */
+    private val LEGACY_SESSION_KEYS = arrayOf(
+        "last_effect", "last_sampling", "last_rotation", "trim_start", "trim_end",
+        "is_zoom_to_fill", "last_source_type", "last_codec", "trim_start_ms",
+        "trim_end_ms", "auto_save_after_render", "is_endless", "frame_blending",
+        "speed", "resolution", "encoding_h265", "preserve_audio", "output_fps",
+        "file_quality", "full_res_export", "zoom_scale", "pan_x", "pan_y",
+        "trim_start_frame_index", "trim_end_frame_index", "last_media_uri"
+    )
+
+    /**
+     * Remove ONLY the persisted session.
+     *
+     * This used to be `prefs.edit().clear()`, which also destroyed the per-URI trim
+     * memory and every unrelated key in the file. A stale or un-restorable session
+     * (for example a folder whose child-document URI was stored instead of its tree
+     * URI) must never cost the user anything but the session itself.
+     */
+    fun clearPersistedSession(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val editor = prefs.edit().remove(SESSION_STATE_KEY)
+            LEGACY_SESSION_KEYS.forEach { editor.remove(it) }
+            editor.commit()
+        } catch (e: Exception) {
+            Log.e("TimeLapse", "Failed to clear persisted session", e)
+        }
+    }
+
+    /**
+     * Tolerant codec for the persisted session. `ignoreUnknownKeys` matters because a
+     * schema change used to make decodeFromString throw, which fell back to the legacy
+     * loader (returns null) and left the stale key in place forever.
+     */
+    private val sessionJson = Json {
+        ignoreUnknownKeys = true
+        coerceInputValues = true
+    }
+
     fun saveSession(context: Context) {
         try {
             val input = framesInput.value
             val trimStartFrameIndex = if (input is ImagesFramesInput) _trimRange.value?.first ?: 0f else 0f
             val trimEndFrameIndex = if (input is ImagesFramesInput) _trimRange.value?.second ?: 0f else 0f
-            
+
+            // Derive the persisted source type from the media that is ACTUALLY loaded,
+            // not from _lastSourceType. That field is set before the picker opens, so
+            // cancelling the picker left a session describing the wrong kind of media:
+            // "type=IMAGES, uri=<video>" restored a video through the image loader, which
+            // neither threw nor showed a preview, so the broken session was never cleared.
+            val sourceType = when (input) {
+                is VideoFramesInput -> SourceType.VIDEO
+                is ImagesFramesInput -> if (input.isFolder) SourceType.FOLDER else SourceType.IMAGES
+                else -> _lastSourceType.value ?: SourceType.VIDEO
+            }
+
             val state = SessionState(
-                lastMediaUri = input?.videoUri?.toString(),
+                // For a folder this is the TREE uri (the only persistable grant), not
+                // the first child image — see ImagesFramesInput.persistableUri.
+                lastMediaUri = input?.persistableUri?.toString(),
+                lastMediaUris = (input as? ImagesFramesInput)?.childUris?.map { it.toString() }
+                    ?: emptyList(),
                 lastEffect = _visualEffect.value?.ordinal ?: 0,
                 lastSampling = _motionSampling.value ?: 10,
                 lastRotation = _rotation.value ?: 0,
                 trimStart = _trimRange.value?.first ?: 0f,
                 trimEnd = _trimRange.value?.second ?: 100f,
                 isZoomToFill = _isZoomToFill.value ?: false,
-                lastSourceType = _lastSourceType.value?.name ?: SourceType.VIDEO.name,
+                lastSourceType = sourceType.name,
                 lastCodec = _lastCodec.value?.fourCC ?: Codec.H264.fourCC,
                 trimStartMs = _trimStartMs.value ?: 0L,
                 trimEndMs = _trimEndMs.value ?: 0L,
@@ -1206,12 +1395,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 panX = _previewTransform.value?.translateX ?: 0.0f,
                 panY = _previewTransform.value?.translateY ?: 0.0f,
                 trimStartFrameIndex = trimStartFrameIndex,
-                trimEndFrameIndex = trimEndFrameIndex
+                trimEndFrameIndex = trimEndFrameIndex,
+                outputFps = _outputFps.value ?: 30,
+                fileQuality = _fileQuality.value ?: 50,
+                fullResExport = isFullResExportEnabled.value ?: false
             )
 
-            val json = Json.encodeToString(state)
+            val json = sessionJson.encodeToString(state)
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().putString(SESSION_STATE_KEY, json).apply()
+            // commit(), not apply(): the session must survive an immediate force-stop
+            // after the media load that wrote it. This is a tiny JSON write.
+            prefs.edit().putString(SESSION_STATE_KEY, json).commit()
         } catch (e: SecurityException) {
             Log.w("TimeLapse", "Lost URI permission. Cannot persist session.", e)
             // Clear saved session to prevent crash-loop on next boot
@@ -1234,7 +1428,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
             if (json != null) {
                 try {
-                    val state = Json.decodeFromString<SessionState>(json)
+                    val state = sessionJson.decodeFromString<SessionState>(json)
                     // Use setValue since loadLastSession is always called from main thread
                     _visualEffect.value = Effect.values().getOrElse(state.lastEffect) { Effect.NONE }
                     _motionSampling.value = state.lastSampling
@@ -1256,22 +1450,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _resolution.value = state.resolution
                     _encodingH265.value = state.encodingH265
                     _preserveAudio.value = state.preserveAudio
+                    _outputFps.value = state.outputFps
+                    _fileQuality.value = state.fileQuality
+                    isFullResExportEnabled.value = state.fullResExport
                     _previewTransform.value = PreviewTransformState(state.zoomScale, state.panX, state.panY)
                     // Sync trim ms and frame-index values for audio muxing
                     setTrimRange(state.trimStart, state.trimEnd)
                     uri = state.lastMediaUri?.let { Uri.parse(it) }
-                    // Check if the saved media file still exists before loading
-                    if (uri != null) {
-                        try {
-                            if (DocumentFile.fromSingleUri(getApplication(), uri)?.exists() != true) {
-                                Log.w("TimeLapse", "Saved media file no longer exists, clearing session")
-                                clearSession()
-                                return Pair(null, null)
-                            }
-                        } catch (e: Exception) {
-                            Log.w("TimeLapse", "Could not check file existence, proceeding anyway", e)
-                        }
+                    _lastMediaUris.value = state.lastMediaUris.mapNotNull {
+                        try { Uri.parse(it) } catch (e: Exception) { null }
                     }
+                    // NOTE: the "does this still exist" gate lives in MainActivity
+                    // (isUriAccessible), which understands persisted TREE grants. A second
+                    // DocumentFile/checkUriPermission check here rejected every document
+                    // that lives inside a granted tree (DocumentFile.fromSingleUri(tree
+                    // child) is false and checkUriPermission does not see tree descendants),
+                    // which cleared perfectly valid sessions. The per-source loaders clear
+                    // the session if the file really is gone.
                 } catch (e: Exception) {
                     // Fallback to old method if JSON parsing fails
                     return loadLastSessionLegacy(context)
@@ -1300,6 +1495,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     
     private fun loadLastSessionLegacy(context: Context): Pair<Uri?, String?> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        // The legacy format has no multi-select list.
+        _lastMediaUris.value = emptyList()
         
         // Load effect by ordinal directly (works for both regular and ENDLESS variants)
         val savedOrdinal = prefs.getInt("last_effect", 0)
@@ -1329,6 +1526,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _resolution.value = prefs.getInt("resolution", Settings.RES_1080P)
         _encodingH265.value = prefs.getBoolean("encoding_h265", false)
         _preserveAudio.value = prefs.getBoolean("preserve_audio", true)
+        _outputFps.value = prefs.getInt("output_fps", 30)
+        _fileQuality.value = prefs.getInt("file_quality", 50)
+        isFullResExportEnabled.value = prefs.getBoolean("full_res_export", false)
         
         // Load zoom/pan
         val zoomScale = prefs.getFloat("zoom_scale", 1.0f)
@@ -1397,10 +1597,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearSession() {
         try {
-            val prefs = getApplication<Application>().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            prefs.edit().clear().apply()
+            clearPersistedSession(getApplication())
             _trimRange.value = Pair(1f, 100f)
             _lastSourceType.value = SourceType.VIDEO
+            _lastMediaUris.value = emptyList()
             _framesInput.value = null
             _processedVideoUri.value = null
         } catch (e: Exception) {

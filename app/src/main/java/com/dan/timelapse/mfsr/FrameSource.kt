@@ -29,6 +29,15 @@ interface FrameSource {
     /** Extract a single frame as an RGB Mat. Returns null on failure. */
     fun getFrame(index: Int): Mat?
 
+    /** True when this source can also supply 16-bit (CV_16U) samples. */
+    val isHighBitDepth: Boolean get() = false
+
+    /**
+     * Optional 16-bit frame for MFSR's fusion pass only. Alignment always uses the
+     * 8-bit [getFrame], so gate thresholds never change units. Null = fall back.
+     */
+    fun getFrame16(index: Int): Mat? = null
+
     /** Release any native resources. Safe to call multiple times. */
     fun release()
 }
@@ -152,6 +161,8 @@ class ImagesFrameSource(private val framesInput: FramesInput) : FrameSource {
     override val totalFrames: Int = framesInput.size
     override val width: Int = framesInput.width
     override val height: Int = framesInput.height
+    override val isHighBitDepth: Boolean get() = framesInput.isHighBitDepth
+    override fun getFrame16(index: Int): Mat? = framesInput.getFrame16(index)
 
     override fun getFrame(index: Int): Mat? {
         return try {

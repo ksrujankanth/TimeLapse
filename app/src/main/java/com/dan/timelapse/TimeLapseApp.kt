@@ -31,5 +31,16 @@ class TimeLapseApp : Application() {
         // This applies the user's wallpaper colors to ?attr/colorPrimary throughout the app
         DynamicColors.applyToActivitiesIfAvailable(this)
         Log.d(TAG, "Dynamic colors enabled")
+
+        // Read the learned ETA model off the main thread so the first render does
+        // not pay for a SharedPreferences + JSON parse inside a progress dialog.
+        Thread({
+            try {
+                com.dan.timelapse.eta.Eta.warmUp(this)
+                Log.d(TAG, "ETA model warmed up (${com.dan.timelapse.eta.Eta.engine(this).jobsCompleted()} jobs learned)")
+            } catch (e: Exception) {
+                Log.w(TAG, "ETA warm-up failed", e)
+            }
+        }, "EtaWarmUp").start()
     }
 }

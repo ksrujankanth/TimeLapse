@@ -25,12 +25,17 @@
     <style name="TextAppearance.TimeLapse.Helper" parent="TextAppearance.Material3.BodySmall">
         <item name="android:textColor">@color/colorHelperText</item>
         <item name="android:textSize">12sp</item>
-        <item name="android:alpha">0.7</item>
+        <!-- No extra alpha on top of colorHelperText's own 60%. Compounding one was
+             costing contrast in BOTH themes (dark ~4.1:1, light ~3.0:1 — both below
+             WCAG AA). The colour alone gives ~5.7:1 light / ~6.9:1 dark and still
+             reads as secondary against body text. -->
     </style>
     
     <style name="TextAppearance.TimeLapse.HelperSmall" parent="TextAppearance.Material3.LabelSmall">
-        <item name="android:textColor">@color/colorHelperTextSecondary</item>
+        <item name="android:textColor">@color/colorHelperText</item>
         <item name="android:textSize">11sp</item>
-        <item name="android:alpha">0.6</item>
+        <!-- No extra alpha: colorHelperText is already 60% onSurface. Compounding a 0.6
+             alpha on top of it left the text at ~24% effective opacity (3.2:1 contrast
+             in dark mode) — nearly invisible. -->
     </style>
 </resources>

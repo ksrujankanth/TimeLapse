@@ -22,7 +22,7 @@ interface OnSurfaceReadyListener {
 
 open class TouchImageView @JvmOverloads constructor(
         context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
-) : View(context, attrs, defStyleAttr) {
+) : View(context, attrs, defStyleAttr), ZoomableFrameLayout.ContentBoundsProvider {
 
     companion object {
         const val ACTION_NONE = 0
@@ -147,6 +147,24 @@ open class TouchImageView @JvmOverloads constructor(
         _bitmap?.let { bitmap ->
             _viewRect.set(bestFitRect(width, height, bitmap.width, bitmap.height))
         }
+        notifyParentContentChanged()
+    }
+
+    /**
+     * Reports the real (letterboxed) image rect, in the container's coordinate space, so the
+     * zoom container can never let the photo itself leave the screen.
+     */
+    override fun contentBoundsInContainer(dst: RectF) {
+        dst.set(_viewRect)
+        dst.offset(left.toFloat(), top.toFloat())
+        if (dst.width() <= 0f || dst.height() <= 0f) {
+            // No bitmap yet - claim the whole view so the guard degrades to full-view clamping.
+            dst.set(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
+        }
+    }
+
+    private fun notifyParentContentChanged() {
+        (parent as? ZoomableFrameLayout)?.onContentBoundsChanged()
     }
 
     private fun bestFitRect(outputWidth: Int, outputHeight: Int, inputWidth: Int, inputHeight: Int): RectF {

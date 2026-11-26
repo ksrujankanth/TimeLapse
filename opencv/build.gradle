@@ -27,10 +27,11 @@ android {
     }
 
     // --- 16KB PAGE ALIGNMENT FOR TENSOR G3 / PIXEL 8 PRO ---
-    // Critical: Tensor G3 requires strict 16KB page alignment for native libraries
+    // useLegacyPackaging MUST be false: it stores the .so uncompressed and 16 KB
+    // aligned in the zip, which is what Android 15+ actually requires.
     packagingOptions {
         jniLibs {
-            useLegacyPackaging = true
+            useLegacyPackaging = false
         }
     }
 

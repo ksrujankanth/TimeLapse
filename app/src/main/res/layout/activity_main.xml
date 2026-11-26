@@ -61,7 +61,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="Tap anywhere to choose a video or image sequence"
+                android:text="Tap anywhere to load media"
                 android:textColor="?attr/colorOnSurface"
                 android:alpha="0.6"
                 android:textSize="14sp" />

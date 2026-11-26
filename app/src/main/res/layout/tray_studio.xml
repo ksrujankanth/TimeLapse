@@ -14,24 +14,27 @@
 
         <com.google.android.material.textfield.TextInputLayout
             android:id="@+id/spinnerEffectLayout"
-            style="@style/Widget.Material3.TextInputLayout.OutlinedBox.ExposedDropdownMenu"
+            style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:hint="@string/label_effect"
-            app:endIconMode="dropdown_menu"
+            app:endIconMode="custom"
             app:endIconDrawable="@drawable/ic_dropdown_arrow">
 
             <AutoCompleteTextView
                 android:id="@+id/spinnerEffect"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:paddingStart="16dp"
                 android:inputType="none"
                 android:text="Average"
                 android:textSize="16sp"
                 android:focusable="false"
                 android:focusableInTouchMode="false"
-                android:clickable="true" />
+                android:clickable="true"
+                android:ellipsize="end"
+                android:maxLines="1" />
         </com.google.android.material.textfield.TextInputLayout>
 
         <com.google.android.material.materialswitch.MaterialSwitch

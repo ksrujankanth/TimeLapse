@@ -10,12 +10,14 @@ import android.net.Uri
 import android.util.AttributeSet
 import android.view.Surface
 import android.view.TextureView
+import android.view.View
 
 class TextureVideoView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
     defStyleAttr: Int = 0
-) : TextureView(context, attrs, defStyleAttr), TextureView.SurfaceTextureListener {
+) : TextureView(context, attrs, defStyleAttr), TextureView.SurfaceTextureListener,
+    ZoomableFrameLayout.ContentBoundsProvider {
 
     private var mediaPlayer: MediaPlayer? = null
     private var mSurface: Surface? = null
@@ -35,6 +37,20 @@ class TextureVideoView @JvmOverloads constructor(
         super.onSizeChanged(w, h, oldw, oldh)
         if (isPrepared) {
             applyMatrix()
+        }
+        (parent as? ZoomableFrameLayout)?.onContentBoundsChanged()
+    }
+
+    /**
+     * This view letterboxes by physically shrinking itself to the visible video box
+     * (see [onMeasure]), so its own bounds ARE the media box. Report them in the
+     * container's coordinate space for the zoom container's bounds guard.
+     */
+    override fun contentBoundsInContainer(dst: RectF) {
+        dst.set(left.toFloat(), top.toFloat(), right.toFloat(), bottom.toFloat())
+        if (dst.width() <= 0f || dst.height() <= 0f) {
+            val container = parent as? View
+            dst.set(0f, 0f, (container?.width ?: 0).toFloat(), (container?.height ?: 0).toFloat())
         }
     }
 

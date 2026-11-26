@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-screen effect picker.
+
+  Twelve previews in a 2-column grid. The sheet is deliberately scrollable:
+  the grid is 6 rows tall and its height grows with the window width (the tiles
+  keep a 240:112 aspect), so on a 360x640 dp device, in split-screen, or at the
+  largest display-size/font settings it is taller than the window. This layout
+  used to claim "rows carry layout_weight = 1 so the sheet never scrolls" but no
+  weight was ever applied, so the last row (Median / Super Resolution) was clipped
+  and untappable. fillViewport keeps the card vertically centred when it DOES fit.
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/effectPickerRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent"
+    android:padding="14dp">
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:scrollbars="none">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <LinearLayout
+                android:id="@+id/effectPickerCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical"
+                android:orientation="vertical"
+                android:padding="14dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/effectPickerTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/effect_picker_title"
+                        android:textColor="?attr/colorOnSurface"
+                        android:textSize="20sp"
+                        android:textStyle="bold" />
+
+                    <ImageButton
+                        android:id="@+id/effectPickerClose"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:contentDescription="@string/effect_picker_close"
+                        android:padding="8dp"
+                        android:src="@drawable/ic_close" />
+                </LinearLayout>
+
+                <!-- A short line here tells the user the tiles are live, so the motion is not
+                     mistaken for a loading state. -->
+                <TextView
+                    android:id="@+id/effectPickerHint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="@string/effect_picker_hint"
+                    style="@style/TextAppearance.TimeLapse.Helper" />
+
+                <LinearLayout
+                    android:id="@+id/effectGrid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="14dp"
+                    android:orientation="vertical" />
+
+            </LinearLayout>
+
+        </FrameLayout>
+
+    </ScrollView>
+
+</FrameLayout>

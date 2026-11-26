@@ -13,6 +13,11 @@
     <string name="load_folder">Load folder</string>
     <string name="change_media">Change media</string>
     <string name="generate_video">Apply Effect</string>
+    <string name="effect_picker_title">Choose an effect</string>
+    <string name="effect_picker_hint">Each tile is a live preview of what the filter does. Tap to apply.</string>
+    <string name="effect_picker_close">Close</string>
+    <string name="effect_picker_applied">%1$s applied</string>
+    <string name="effect_picker_selected">%1$s selected</string>
     <string name="share_video">Share video</string>
     <string name="share_image">Share image</string>
     <string name="save_gallery">Save to Gallery</string>
@@ -37,13 +42,13 @@
     
     <!-- Helper Texts -->
     <string name="helper_stacking">Average Stacking - skipping every Nth frame</string>
-    <string name="helper_video_specs">%1$sp at %2$dfps%3$s</string>
+    <string name="helper_video_specs">%1$s at %2$d fps%3$s</string>
     <string name="helper_frame">Frame %1$d at %2$d x %3$d</string>
     <string name="helper_trim">Choose a part to render.</string>
     <string name="helper_mask_edit">You can zoom in to make fine adjustments. All changes auto-saved.</string>
     <string name="helper_speed">at %dx speed</string>
     <string name="helper_image_frame">Frame %1$d selected</string>
-    <string name="helper_resolution">%1$s at %2$dfps</string>
+    <string name="helper_resolution">%1$s at %2$d fps</string>
     
     <!-- Toast Messages -->
     <string name="toast_mask_saved">Mask saved</string>

@@ -16,28 +16,16 @@ import com.dan.timelapse.MainActivity
 import com.dan.timelapse.MainViewModel
 import com.dan.timelapse.R
 import com.dan.timelapse.databinding.TrayStudioBinding
-import com.dan.timelapse.ui.EffectSpinnerAdapter
+import com.dan.timelapse.ui.EffectPickerDialog
 
 class StudioFragment : Fragment() {
     private val model: MainViewModel by activityViewModels()
     private var _binding: TrayStudioBinding? = null
     private val binding get() = _binding!!
 
-    // Mapping from UI effect names index to their Effect.ordinal values
-    private val EFFECT_ORDINAL_MAPPINGS = intArrayOf(
-        Effect.NONE.ordinal,
-        Effect.AVERAGE.ordinal,
-        Effect.AVERAGE_WEIGHTED_FOR_LAST.ordinal,
-        Effect.AVERAGE_WEIGHTED_FOR_LIGHT.ordinal,
-        Effect.LIGHTEST_PIXELS.ordinal,
-        Effect.ADD.ordinal,
-        Effect.HDR.ordinal,
-        Effect.TRANSITION.ordinal,
-        Effect.DARKEST_PIXELS.ordinal,
-        Effect.MOTION_EXTRACTION.ordinal,
-        Effect.MEDIAN_STACK.ordinal,
-        Effect.SUPER_RESOLUTION.ordinal
-    )
+    // Spinner position -> Effect. Effect.UI_ORDER is the single source of truth for the
+    // picker order, so the labels, the previews and the render cannot drift apart.
+    private val effectOrdinals: IntArray = Effect.UI_ORDER.map { it.ordinal }.toIntArray()
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = TrayStudioBinding.inflate(inflater, container, false)
@@ -69,67 +57,15 @@ class StudioFragment : Fragment() {
     }
 
     private fun setupEffects() {
-        val effects = resources.getStringArray(R.array.effect_names)
-        val adapter = EffectSpinnerAdapter(requireContext(), effects)
-        binding.spinnerEffect.setAdapter(adapter)
-
-        // G10-04: Ensure dropdown opens on click and animations play
-        binding.spinnerEffect.setOnClickListener {
-            binding.spinnerEffect.showDropDown()
-        }
-        
-        // Restart animations when dropdown shows
-        binding.spinnerEffect.setOnDismissListener {
-            // Dropdown dismissed - animations will restart on next open
-        }
-        
-        // Only the spinner itself triggers dropdown, not the parent layout
-        // This prevents phantom clicks from the entire tray area
-
-        // Map spinner positions to Effect ordinals (matching the effect_names array order)
-        val effectOrdinals = intArrayOf(
-            Effect.NONE.ordinal,
-            Effect.AVERAGE.ordinal,
-            Effect.AVERAGE_WEIGHTED_FOR_LAST.ordinal,
-            Effect.AVERAGE_WEIGHTED_FOR_LIGHT.ordinal,
-            Effect.LIGHTEST_PIXELS.ordinal,
-            Effect.ADD.ordinal,
-            Effect.HDR.ordinal,
-            Effect.TRANSITION.ordinal,
-            Effect.DARKEST_PIXELS.ordinal,
-            Effect.MOTION_EXTRACTION.ordinal,
-            Effect.MEDIAN_STACK.ordinal,
-            Effect.SUPER_RESOLUTION.ordinal
-        )
+        // The picker is a full-screen gallery, not a dropdown: twelve animated previews
+        // cannot be shown at a legible size inside a popup anchored to this field.
+        binding.spinnerEffect.setOnClickListener { showEffectPicker() }
+        binding.spinnerEffectLayout.setEndIconOnClickListener { showEffectPicker() }
 
         // Get current effect ordinal and find matching spinner position
         val currentEffectOrdinal = model.visualEffect.value?.ordinal ?: 0
         val spinnerPosition = effectOrdinals.indexOf(currentEffectOrdinal).takeIf { it >= 0 } ?: 0
-
-        binding.spinnerEffect.setText(effects[spinnerPosition], false)
-        val descriptions = resources.getStringArray(R.array.effect_descriptions)
-        binding.textEffectDescription.text = descriptions[spinnerPosition]
-
-        // Initial state - update endless toggle and slider based on current effect
-        updateEndlessToggleState(spinnerPosition, effectOrdinals)
-        updateSliderState(model.isEndless.value ?: false)
-
-        binding.spinnerEffect.setOnItemClickListener { _, _, position, _ ->
-            // Map spinner position to Effect ordinal
-            val effectOrdinal = effectOrdinals[position]
-            model.setVisualEffect(effectOrdinal)
-            binding.textEffectDescription.text = descriptions[position]
-
-            // Update endless toggle state based on effect
-            updateEndlessToggleState(position, effectOrdinals)
-
-            // If endless was enabled but new effect doesn't support it, disable it
-            val effectOrdinalValue = effectOrdinals.getOrNull(position) ?: 0
-            val effect = Effect.entries.getOrElse(effectOrdinalValue) { Effect.NONE }
-            if (!effect.supportsEndless && model.isEndless.value == true) {
-                model.setEndless(false)
-            }
-        }
+        bindEffectSelection(spinnerPosition)
 
         // Observe endless state changes
         model.isEndless.observe(viewLifecycleOwner) { isEndless ->
@@ -173,6 +109,9 @@ class StudioFragment : Fragment() {
                 val blendingValue = model.frameBlending.value
                 binding.textSamplingLabel.text = "Intensity (${blendingValue ?: 10} frames)"
             }
+
+            // The speed summary must not promise a stride the renderer will skip.
+            updateSpeedSummary()
         }
 
         // Sampling slider - set initial value with safe clamping
@@ -259,6 +198,32 @@ class StudioFragment : Fragment() {
         }
     }
 
+    private fun showEffectPicker() {
+        val currentEffectOrdinal = model.visualEffect.value?.ordinal ?: 0
+        val selected = effectOrdinals.indexOf(currentEffectOrdinal).takeIf { it >= 0 } ?: 0
+        EffectPickerDialog.show(requireContext(), selected) { position ->
+            model.setVisualEffect(effectOrdinals.getOrElse(position) { Effect.NONE.ordinal })
+            bindEffectSelection(position)
+        }
+    }
+
+    /** Updates every control that depends on the chosen picker position. */
+    private fun bindEffectSelection(position: Int) {
+        val effects = resources.getStringArray(R.array.effect_names)
+        val descriptions = resources.getStringArray(R.array.effect_descriptions)
+        binding.spinnerEffect.setText(effects.getOrElse(position) { effects[0] }, false)
+        binding.textEffectDescription.text = descriptions.getOrElse(position) { descriptions[0] }
+
+        updateEndlessToggleState(position, effectOrdinals)
+        updateSliderState(model.isEndless.value ?: false)
+
+        // If endless was enabled but the new effect doesn't support it, switch it off.
+        val effect = Effect.entries.getOrElse(effectOrdinals.getOrElse(position) { 0 }) { Effect.NONE }
+        if (!effect.supportsEndless && model.isEndless.value == true) {
+            model.setEndless(false)
+        }
+    }
+
     private fun updateEndlessToggleState(spinnerPosition: Int, effectOrdinals: IntArray) {
         val effectOrdinal = effectOrdinals.getOrNull(spinnerPosition) ?: 0
         val effect = Effect.entries.getOrElse(effectOrdinal) { Effect.NONE }
@@ -308,7 +273,7 @@ class StudioFragment : Fragment() {
             val uiEffectsArray = resources.getStringArray(R.array.effect_names)
             val currentText = binding.spinnerEffect.text?.toString() ?: ""
             val indexFromUI = uiEffectsArray.indexOf(currentText).coerceAtLeast(0)
-            val ordinal = EFFECT_ORDINAL_MAPPINGS.getOrNull(indexFromUI) ?: Effect.NONE.ordinal
+            val ordinal = effectOrdinals.getOrNull(indexFromUI) ?: Effect.NONE.ordinal
             model.setVisualEffect(ordinal)
 
             // Phase 2: Trigger render now that VM state is synchronized
@@ -320,14 +285,30 @@ class StudioFragment : Fragment() {
         }
         
         // Observe speed multiplier to update the summary text
-        model.speedMultiplier.observe(viewLifecycleOwner) { speed ->
-            val baseDesc = "Controls how many frames are merged together to create the final look."
-            if (speed <= 1) {
+        model.speedMultiplier.observe(viewLifecycleOwner) { updateSpeedSummary() }
+    }
+
+    /**
+     * Single source for the "speed" copy in this tray. Super Resolution ignores
+     * input speed entirely, so saying "60x, skipping 59 frames" there is a lie.
+     */
+    private fun updateSpeedSummary() {
+        val speed = model.speedMultiplier.value ?: 1
+        val baseDesc = "Controls how many frames are merged together to create the final look."
+        val applicable = model.isInputSpeedApplicable()
+        when {
+            !applicable -> {
+                binding.tvSpeedSummary.visibility = View.VISIBLE
+                binding.tvSpeedSummary.text = "Input speed not used by Super Resolution"
+                binding.textHelperStacking.text = baseDesc
+            }
+            speed <= 1 -> {
                 binding.tvSpeedSummary.visibility = View.GONE
                 binding.textHelperStacking.text = baseDesc
-            } else {
-                binding.tvSpeedSummary.visibility = View.VISIBLE
+            }
+            else -> {
                 val framesSkipped = speed - 1
+                binding.tvSpeedSummary.visibility = View.VISIBLE
                 binding.tvSpeedSummary.text = "${speed}x Speed (Skipping $framesSkipped frames between captures)"
                 binding.textHelperStacking.text = "$baseDesc • (Speed: ${speed}x, skipping ${framesSkipped} frames)"
             }
@@ -341,6 +322,7 @@ class StudioFragment : Fragment() {
 
         val sliderInput = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderInputSpeed)
         val tvInputLabel = view.findViewById<android.widget.TextView>(R.id.tvInputSpeedLabel)
+        val tvInputHint = view.findViewById<android.widget.TextView>(R.id.tvInputSpeedHint)
         val sliderOutput = view.findViewById<com.google.android.material.slider.Slider>(R.id.sliderOutputSpeed)
         val tvOutputLabel = view.findViewById<android.widget.TextView>(R.id.tvOutputSpeedLabel)
 
@@ -349,7 +331,18 @@ class StudioFragment : Fragment() {
         sliderInput.valueTo = (model.speedOptions.size - 1).toFloat()
         val currentSpeed = model.speedMultiplier.value ?: 1
         sliderInput.value = model.speedOptions.indexOf(currentSpeed).coerceAtLeast(0).toFloat()
-        tvInputLabel.text = "Input speed: ${currentSpeed}x"
+
+        // Super Resolution consumes every frame for sub-pixel coverage, so the
+        // renderer deliberately ignores this value. A live slider that changes
+        // nothing is worse than a disabled one that says why.
+        if (model.isInputSpeedApplicable()) {
+            tvInputLabel.text = "Input speed: ${currentSpeed}x"
+        } else {
+            sliderInput.isEnabled = false
+            sliderInput.alpha = 0.38f
+            tvInputLabel.text = "Input speed: not used by Super Resolution"
+            tvInputHint.text = "Super Resolution needs every frame"
+        }
 
         sliderInput.addOnChangeListener { _, value, _ ->
             val speed = model.speedOptions[value.toInt()]
@@ -361,7 +354,9 @@ class StudioFragment : Fragment() {
             override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {}
             
             override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
-                model.triggerStudioProcess()
+                // Scrubbing input speed is exploratory: re-render the preview, but
+                // do not auto-save one file per slider stop.
+                model.triggerStudioProcess(suppressAutoSave = true)
             }
         })
 

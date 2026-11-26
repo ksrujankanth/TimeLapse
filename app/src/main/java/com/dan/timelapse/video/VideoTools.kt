@@ -11,7 +11,7 @@ import java.nio.ByteBuffer
 
 class VideoTools {
     companion object {
-        private const val BUFFER_SIZE = 5 * 1024 * 1024 //1 MB
+        private const val BUFFER_SIZE = 32 * 1024 * 1024 // 32 MB: 4K keyframes can exceed 5 MB
 
         fun countFrames(context: Context, uri: Uri): Int {
             var counter = 1
@@ -40,52 +40,127 @@ class VideoTools {
             return counter
         }
 
+        /**
+         * True when the file carries at least one audio track.
+         *
+         * The FPS fast-remux below rewrites every sample's timestamp by 1/speedFactor
+         * (including audio) without resampling, so a clip with audio would desync or
+         * stutter. Callers must fall back to a full re-render in that case.
+         */
+        fun hasAudioTrack(path: String): Boolean {
+            val ex = android.media.MediaExtractor()
+            return try {
+                ex.setDataSource(path)
+                (0 until ex.trackCount).any {
+                    ex.getTrackFormat(it).getString(android.media.MediaFormat.KEY_MIME)
+                        ?.startsWith("audio/") == true
+                }
+            } catch (e: Exception) {
+                false
+            } finally {
+                ex.release()
+            }
+        }
+
         fun fastRemuxVideoSpeed(inputFilePath: String, outputFilePath: String, sourceFps: Int, targetFps: Int) {
-            if (sourceFps == targetFps) return
+            // Unreachable today (equal fps is short-circuited by the caller before this
+            // point), but returning without creating outputFilePath would leave the
+            // caller pointing at a file that does not exist. Keep the no-op explicit.
+            if (sourceFps == targetFps) {
+                android.util.Log.w("VideoTools", "fastRemuxVideoSpeed: same fps ($sourceFps), nothing to do")
+                return
+            }
             
             val speedFactor = targetFps.toFloat() / sourceFps.toFloat()
             
-            val extractor = android.media.MediaExtractor()
-            extractor.setDataSource(inputFilePath)
-            
-            val muxer = android.media.MediaMuxer(outputFilePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val trackMap = HashMap<Int, Int>()
-            
-            for (i in 0 until extractor.trackCount) {
-                val format = extractor.getTrackFormat(i)
-                val muxerTrackIndex = muxer.addTrack(format)
-                trackMap[i] = muxerTrackIndex
+            var extractor: android.media.MediaExtractor? = null
+            var muxer: android.media.MediaMuxer? = null
+            var muxerStarted = false
+            var completed = false
+            // A future caller must never be able to hand us the same path twice: the
+            // `!completed` cleanup below deletes outputFilePath on failure.
+            require(File(inputFilePath).absolutePath != File(outputFilePath).absolutePath) {
+                "fastRemuxVideoSpeed: output must differ from input"
             }
-            
-            muxer.start()
-            
-            val buffer = java.nio.ByteBuffer.allocate(1024 * 1024 * 2)
-            val bufferInfo = android.media.MediaCodec.BufferInfo()
-            
-            for (i in 0 until extractor.trackCount) {
-                extractor.selectTrack(i)
+            try {
+                extractor = android.media.MediaExtractor()
+                extractor.setDataSource(inputFilePath)
+                
+                muxer = android.media.MediaMuxer(outputFilePath, android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+                val trackMap = HashMap<Int, Int>()
+                
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    // Keep the container's declared frame rate in sync with the
+                    // timestamps we are about to rewrite.
+                    if (format.getString(MediaFormat.KEY_MIME)?.startsWith("video/") == true) {
+                        format.setInteger(MediaFormat.KEY_FRAME_RATE, targetFps)
+                    }
+                    val muxerTrackIndex = muxer.addTrack(format)
+                    trackMap[i] = muxerTrackIndex
+                }
+                
+                muxer.start()
+                muxerStarted = true
+                
+                val buffer = java.nio.ByteBuffer.allocateDirect(BUFFER_SIZE)
+                val bufferInfo = android.media.MediaCodec.BufferInfo()
+                
+                for (i in 0 until extractor.trackCount) {
+                    extractor.selectTrack(i)
+                }
+                
+                while (true) {
+                    val trackIndex = extractor.sampleTrackIndex
+                    if (trackIndex < 0) break
+                    
+                    val size = extractor.readSampleData(buffer, 0)
+                    if (size < 0) break
+                    
+                    bufferInfo.size = size
+                    bufferInfo.offset = 0
+                    // MediaExtractor flags and MediaCodec flags are NOT the same enum:
+                    // SAMPLE_FLAG_PARTIAL (2) collides with BUFFER_FLAG_CODEC_CONFIG (2).
+                    // Only the sync flag is meaningful here.
+                    bufferInfo.flags =
+                        if (extractor.sampleFlags and android.media.MediaExtractor.SAMPLE_FLAG_SYNC != 0)
+                            android.media.MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
+                    
+                    bufferInfo.presentationTimeUs = (extractor.sampleTime / speedFactor).toLong()
+                    
+                    muxer.writeSampleData(trackMap[trackIndex]!!, buffer, bufferInfo)
+                    extractor.advance()
+                }
+                
+                muxer.stop()
+                muxerStarted = false
+                completed = true
+            } catch (e: Exception) {
+                android.util.Log.e("VideoTools", "fastRemuxVideoSpeed failed", e)
+                throw e
+            } finally {
+                // The previous version had no finally at all: any throw leaked the muxer
+                // and its file descriptor and left a moov-less, unplayable file in cacheDir.
+                if (muxerStarted) {
+                    try { muxer?.stop() } catch (e: Exception) {
+                        android.util.Log.w("VideoTools", "muxer.stop() during cleanup failed", e)
+                    }
+                }
+                try { muxer?.release() } catch (e: Exception) {
+                    android.util.Log.w("VideoTools", "muxer.release() failed", e)
+                }
+                try { extractor?.release() } catch (e: Exception) {
+                    android.util.Log.w("VideoTools", "extractor.release() failed", e)
+                }
+                if (!completed) {
+                    try {
+                        val partial = File(outputFilePath)
+                        if (partial.exists()) partial.delete()
+                    } catch (e: Exception) {
+                        android.util.Log.w("VideoTools", "Could not delete partial remux output", e)
+                    }
+                }
             }
-            
-            while (true) {
-                val trackIndex = extractor.sampleTrackIndex
-                if (trackIndex < 0) break
-                
-                val size = extractor.readSampleData(buffer, 0)
-                if (size < 0) break
-                
-                bufferInfo.size = size
-                bufferInfo.offset = 0
-                bufferInfo.flags = extractor.sampleFlags
-                
-                bufferInfo.presentationTimeUs = (extractor.sampleTime / speedFactor).toLong()
-                
-                muxer.writeSampleData(trackMap[trackIndex]!!, buffer, bufferInfo)
-                extractor.advance()
-            }
-            
-            muxer.stop()
-            muxer.release()
-            extractor.release()
         }
 
         fun changeFps(tmpFile: String, fps: Int) {

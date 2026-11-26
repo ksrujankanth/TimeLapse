@@ -25,6 +25,31 @@ class VideoEncoder private constructor(
     companion object {
         private const val TAG = "VideoEncoder"
 
+        /**
+         * Resolution- and frame-rate-aware bitrate. A fixed 5 Mbps is fine for
+         * 1080p30 but starves 4K and over-spends on 720p. 0.10 bits/pixel/frame
+         * for AVC and 0.07 for HEVC, scaled by the user's quality slider
+         * (50% = the calibrated baseline).
+         */
+        private fun estimateBitRate(width: Int, height: Int, fps: Int, h265: Boolean, qualityPercent: Int): Int {
+            val bitsPerPixel = if (h265) 0.07 else 0.10
+            val baseline = width.toDouble() * height.toDouble() * fps.coerceAtLeast(1) * bitsPerPixel
+            val scaled = baseline * (qualityPercent.coerceIn(1, 100) / 50.0)
+            return scaled.toInt().coerceIn(500_000, 120_000_000)
+        }
+
+        /** Minimal legal AVC level for the frame size + rate (Level 4 caps at 1080p30). */
+        private fun avcLevelFor(width: Int, height: Int, fps: Int): Int {
+            val pixels = width.toLong() * height.toLong()
+            val pixelsPerSecond = pixels * fps.coerceAtLeast(1)
+            return when {
+                pixels <= 1920L * 1088L && fps <= 30 -> MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                pixels <= 2048L * 1088L && fps <= 60 -> MediaCodecInfo.CodecProfileLevel.AVCLevel42
+                pixelsPerSecond <= 4096L * 2304L * 30L -> MediaCodecInfo.CodecProfileLevel.AVCLevel51
+                else -> MediaCodecInfo.CodecProfileLevel.AVCLevel52
+            }
+        }
+
         fun isH265Supported(): Boolean {
             return try {
                 val codecs = MediaCodecList(MediaCodecList.ALL_CODECS)
@@ -39,8 +64,8 @@ class VideoEncoder private constructor(
             }
         }
 
-        fun create(path: String, fps: Int, width: Int, height: Int, h265: Boolean, sourceIsImages: Boolean = false): VideoEncoder {
-            Log.d(TAG, "Initializing VideoEncoder: ${width}x${height} @ $fps fps")
+        fun create(path: String, fps: Int, width: Int, height: Int, h265: Boolean, sourceIsImages: Boolean = false, qualityPercent: Int = 50): VideoEncoder {
+            Log.d(TAG, "Initializing VideoEncoder: ${width}x${height} @ $fps fps (quality ${qualityPercent}%)")
 
             val finalWidth = (width / 2) * 2
             val finalHeight = (height / 2) * 2
@@ -50,7 +75,8 @@ class VideoEncoder private constructor(
             }
 
             val mimeType = if (h265) MediaFormat.MIMETYPE_VIDEO_HEVC else MediaFormat.MIMETYPE_VIDEO_AVC
-            val bitRate = 5_000_000
+            val bitRate = estimateBitRate(finalWidth, finalHeight, fps, h265, qualityPercent)
+            Log.d(TAG, "Encoder bitrate: ${bitRate / 1_000_000.0} Mbps")
 
             val format = MediaFormat.createVideoFormat(mimeType, finalWidth, finalHeight).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
@@ -64,13 +90,38 @@ class VideoEncoder private constructor(
                 setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
 
                 if (!h265) {
-                    setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline)
-                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
+                    // High profile above 1080p: Baseline is legal there but hardware
+                    // encoders commonly reject Baseline + level 5.x for UHD.
+                    val profile = if (finalWidth.toLong() * finalHeight > 1920L * 1088L) {
+                        MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+                    } else {
+                        MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                    }
+                    setInteger(MediaFormat.KEY_PROFILE, profile)
+                    // Level 4 only covers 1080p30. A 4K stream declared as level 4
+                    // is invalid and strict encoders reject it.
+                    setInteger(MediaFormat.KEY_LEVEL, avcLevelFor(finalWidth, finalHeight, fps))
                 }
             }
 
             val encoder = MediaCodec.createEncoderByType(mimeType)
-            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            try {
+                encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            } catch (e: Exception) {
+                // Some encoders reject an explicit profile/level (common with UHD
+                // Baseline + 5.x). Retry with the encoder's own defaults before
+                // failing the whole render.
+                Log.w(TAG, "configure() rejected profile/level, retrying defaults", e)
+                try { encoder.reset() } catch (_: Exception) {}
+                val relaxed = MediaFormat.createVideoFormat(mimeType, finalWidth, finalHeight)
+                relaxed.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                relaxed.setInteger(MediaFormat.KEY_BIT_RATE, bitRate)
+                relaxed.setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+                relaxed.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                relaxed.setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_FULL)
+                relaxed.setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                encoder.configure(relaxed, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            }
             val surface = encoder.createInputSurface()
             val muxer = MediaMuxer(path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
 

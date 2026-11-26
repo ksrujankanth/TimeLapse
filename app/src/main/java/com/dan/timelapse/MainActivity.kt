@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import android.content.ContentValues
 import android.os.Bundle
 import android.os.Handler
@@ -58,21 +59,26 @@ import org.opencv.android.Utils
 import org.opencv.core.CvException
 import org.opencv.core.Core
 import org.opencv.core.Mat
-import com.dan.timelapse.utils.EtaCalibrator
-import com.dan.timelapse.utils.PhaseProfileKey
-import com.dan.timelapse.utils.isDevicePluggedIn
+import com.dan.timelapse.eta.Eta
+import com.dan.timelapse.eta.EtaApp
+import com.dan.timelapse.eta.EtaDialogText
+import com.dan.timelapse.eta.EtaPhase
+import com.dan.timelapse.eta.EtaSpecs
 import com.dan.timelapse.utils.OutputParams
+import com.dan.timelapse.utils.ShareIntentRules
+import com.dan.timelapse.utils.SharedMediaMaterializer
 import com.dan.timelapse.video.VideoTools
 import java.io.File
 import androidx.appcompat.app.AlertDialog
-
-private enum class MfsrPhase { EXTRACT, SCAN, MATRICES, ACCUMULATE, FINALIZE, COMPLETE }
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val model: MainViewModel by viewModels()
     private lateinit var gestureDetector: GestureDetector
     private var playbackJob: Job? = null
+
+    /** Upper bound on waiting for the preview loop to finish an in-flight frame decode. */
+    private val PREVIEW_JOIN_TIMEOUT_MS = 3_000L
     
     private var isTrayVisible = false
     private var isTrayForcedOpen = false
@@ -81,10 +87,52 @@ class MainActivity : AppCompatActivity() {
     private var generateDialog: AlertDialog? = null
     private var processingJob: kotlinx.coroutines.Job? = null
     private var cancelPressCount = 0
+
+    // Learned-ETA job for the media loading dialog (folder scan / share intake).
+    private var loadingEtaJob: com.dan.timelapse.eta.EtaJob? = null
+    private var loadingEtaPhase: EtaPhase? = null
+    private var loadingEtaLastFraction: Double = 0.0
+    private var lastLoadingDialogLog: String? = null
+
+    /**
+     * The app-wide zoom listener. MaskEditFragment swaps in its own listener while it is open,
+     * so this has to be a field we can restore on the way out.
+     */
+    private val videoZoomListener = object : ZoomableFrameLayout.OnZoomListener {
+        override fun onZoom(scale: Float, translationX: Float, translationY: Float) {
+            model.setZoom(scale, translationX, translationY)
+        }
+
+        override fun onZoomReset() {
+            model.setZoom(1f, 0f, 0f)
+        }
+    }
     
     // Loading dialog for huge folders/files
     private var loadingDialog: AlertDialog? = null
     private var loadingJob: Job? = null
+
+    /**
+     * True while the loaded media came from a share intent.
+     *
+     * A share hands over a ONE-SHOT read grant (Google Photos' cloud items included), so the
+     * URI must never be written into the saved session: the grant is gone on the next launch
+     * and the session would "restore" into nothing. Share loads are deliberately not persisted;
+     * the media still lives in the app cache for the whole session.
+     */
+    private var isSharedMediaSession = false
+    private val shareMaterializer by lazy { SharedMediaMaterializer(this) }
+
+    /** What a share intent asked us to open. A null kind means "sniff the bytes". */
+    private data class SharePayload(
+        val kind: ShareIntentRules.Kind?,
+        val uris: List<Uri>,
+        val mime: String?
+    )
+
+    /** Test hook for the share-intake instrumented test. */
+    internal fun loadedFrameCount(): Int = model.framesInput.value?.size ?: 0
+
 
     // Colors are handled via XML theme attributes (?attr/colorPrimary)
     
@@ -94,6 +142,8 @@ class MainActivity : AppCompatActivity() {
     
     // Capture MediaPlayer for frame-accurate seeking
     private var activeMediaPlayer: android.media.MediaPlayer? = null
+    private var previewLoopTarget: Int = 0
+    private var previewLoopsDone: Int = 0
 
     // Prevents watchdog from spamming seek commands before the player has time to move
     private var lastWatchdogSeekTime = 0L
@@ -174,6 +224,14 @@ class MainActivity : AppCompatActivity() {
     private val previewBitmapPool = arrayOfNulls<android.graphics.Bitmap>(3)
     private var previewPoolIndex = 0
     
+    /**
+     * `@Synchronized`: this is called from the preview coroutine (Dispatchers.Default),
+     * the scrubber (Dispatchers.IO) and frame selection. Unsynchronised, two callers could
+     * both read `previewPoolIndex` and one could recycle() the very Bitmap the other was
+     * about to hand to Utils.matToBitmap — a recycled Bitmap makes AndroidBitmap_getInfo
+     * fail, which surfaced as "info.format == RGBA_8888" assertion failures.
+     */
+    @Synchronized
     private fun getPooledPreviewBitmap(width: Int, height: Int): android.graphics.Bitmap {
         val current = previewBitmapPool[previewPoolIndex]
         if (current == null || current.width != width || current.height != height) {
@@ -285,22 +343,19 @@ class MainActivity : AppCompatActivity() {
 
             val isPlayingSafely = try { binding.videoView.isPlaying } catch(e: Exception) { false }
             if (isPlayingSafely) {
-                // Real-time Video Speed Sync (For Original AND Rendered videos)
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                // Real-time speed sync for the ORIGINAL video only. Rendered files
+                // already carry their own timestamps; overriding their playbackParams
+                // fought the short-clip speed boost applied in onPrepared.
+                if (isPlayingOriginalVideo &&
+                    android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
                     try {
                         activeMediaPlayer?.let { mp ->
-                            val targetFps = model.previewFps.value ?: 30
                             var baseFps = 30
-
-                            if (isPlayingOriginalVideo) {
-                                val input = model.framesInput.value
-                                if (input is com.dan.timelapse.framesinput.VideoFramesInput) {
-                                    baseFps = input.fps.coerceAtLeast(1)
-                                }
-                            } else {
-                                baseFps = 30
+                            val input = model.framesInput.value
+                            if (input is com.dan.timelapse.framesinput.VideoFramesInput) {
+                                baseFps = input.fps.coerceAtLeast(1)
                             }
-
+                            val targetFps = model.previewFps.value ?: 30
                             val speedFactor = targetFps.toFloat() / baseFps.toFloat()
                             val currentSpeed = try { mp.playbackParams.speed } catch(e: Exception) { 1.0f }
 
@@ -332,23 +387,22 @@ class MainActivity : AppCompatActivity() {
 
                 if (currentMs >= endMs && endMs > 0) {
                     lastWatchdogSeekTime = System.currentTimeMillis()
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        activeMediaPlayer?.seekTo(startMs.toLong(), MediaPlayer.SEEK_CLOSEST)
-                    } else {
-                        binding.videoView.seekTo(startMs.toInt())
-                    }
-                    try {
-                        binding.videoView.start()
-                    } catch (e: Exception) {
-                        // Swallow state desyncs
+                    if (handlePreviewLoopEnd(startMs)) {
+                        return
                     }
                 } else if (currentMs > 0 && currentMs < startMs) {
                     // Catch native MediaPlayer looping to position 0 (isLooping=true suppresses OnCompletionListener)
                     lastWatchdogSeekTime = System.currentTimeMillis()
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                        activeMediaPlayer?.seekTo(startMs.toLong(), MediaPlayer.SEEK_CLOSEST)
-                    } else {
-                        binding.videoView.seekTo(startMs.toInt())
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                            activeMediaPlayer?.seekTo(startMs.toLong(), MediaPlayer.SEEK_CLOSEST)
+                        } else {
+                            binding.videoView.seekTo(startMs.toInt())
+                        }
+                    } catch (e: IllegalStateException) {
+                        Log.w("MainActivity", "Ignored seekTo in watchdog", e)
+                    } catch (e: Exception) {
+                        Log.w("MainActivity", "Seek error in watchdog", e)
                     }
                     try {
                         binding.videoView.start()
@@ -471,6 +525,22 @@ class MainActivity : AppCompatActivity() {
         
         showTray()
 
+        // The "recreated with zoom disabled" repair lives in onPostResume(), not here:
+        // at this point MaskEditFragment's onViewCreated has not run, so the flag is
+        // always still true and the check was dead code.
+
+        // A share intent takes precedence over the last session: the user tapped TimeLapse in
+        // another app's share sheet, so restoring yesterday's media first would flash the wrong
+        // file and fight the loader.
+        val pendingShare = if (model.shareIntentConsumed) null else parseShareIntent(intent)
+        if (pendingShare != null) {
+            // Consume it: a config change recreates this activity with the SAME launch intent,
+            // and replaying a share would replace media the user has since chosen by hand.
+            // (Mutating the intent itself breaks ActivityScenario's intent matching, so the
+            // flag lives in the ViewModel.)
+            model.shareIntentConsumed = true
+            loadSharedPayload(pendingShare)
+        } else
         // Auto-load last session if exists
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -500,28 +570,73 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // Debug-only hook so a device run can start (and cancel) an SR render without
+        // fighting the Effects tray's auto-hide:
+        //   adb shell am start -n com.dan.timelapse/.MainActivity \
+        //       --ez tl_debug_mfsr true --ez tl_debug_cancel true --el tl_debug_cancel_ms 5000
+        val debuggable = (applicationInfo.flags and
+                android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (debuggable && intent?.getBooleanExtra("tl_debug_mfsr", false) == true) {
+            // One-shot: a config change recreates the activity with the SAME Intent
+            // object, which would otherwise start a second render (and a second cancel).
+            intent?.removeExtra("tl_debug_mfsr")
+            lifecycleScope.launch(Dispatchers.Main) {
+                var waited = 0L
+                while (model.framesInput.value == null && waited < 240_000L) {
+                    kotlinx.coroutines.delay(250)
+                    waited += 250
+                }
+                if (model.framesInput.value == null) {
+                    Log.e("TLDebug", "tl_debug_mfsr: no media after ${waited}ms")
+                    return@launch
+                }
+                if (intent.getBooleanExtra("tl_debug_video_render", false)) {
+                    Log.i("TLDebug", "tl_debug_video_render: keeping effect NONE")
+                } else {
+                    model.setVisualEffect(Effect.SUPER_RESOLUTION.ordinal)
+                }
+                if (intent.getBooleanExtra("tl_debug_full_trim", false)) {
+                    // The Media pane owns a RangeSlider that pushes its own default
+                    // (300-frame) values back into the model. Switch to the Effects pane,
+                    // which has no trim slider, then apply the full range so nothing
+                    // overwrites it before the render starts.
+                    binding.bottomNavigation.selectedItemId = R.id.nav_studio
+                    kotlinx.coroutines.delay(1200)
+                    val n = model.framesInput.value?.size ?: 0
+                    if (n > 0) {
+                        model.setTrimRange(1f, n.toFloat())
+                        Log.i("TLDebug", "tl_debug_full_trim: trim 1..$n (Effects pane)")
+                    }
+                }
+                kotlinx.coroutines.delay(500)
+                Log.i("TLDebug", "tl_debug_mfsr: triggering studio process, trim=${model.trimRange.value}")
+                model.triggerStudioProcess()
+                if (intent.getBooleanExtra("tl_debug_cancel", false)) {
+                    val at = intent.getLongExtra("tl_debug_cancel_ms", 5000L)
+                    kotlinx.coroutines.delay(at)
+                    Log.i("TLDebug", "tl_debug_mfsr: cancelling after ${at}ms")
+                    model.cancelProcessing()
+                }
+            }
+        }
+
         binding.mainVideoView.setSurfaceReadyListener(object : OnSurfaceReadyListener {
             override fun onSurfaceReady() {
                 // ...
             }
         })
          
-        binding.dimmerView.setOnClickListener {
-            binding.dimmerView.visibility = View.GONE
-            if (isTrayVisible) {
-                hideTray()
-            }
-        }
+        // NOTE: dimmerView / videoContainer / emptyStateOverlay must NOT get click listeners.
+        // ZoomableFrameLayout intercepts every touch while zoom is enabled, so listeners
+        // inside it can never fire — EXCEPT in the mask editor, where isZoomEnabled is
+        // false and DRAW/ERASE needs touches to reach MaskView. That is why the dimmer
+        // is force-hidden in mask mode (updateDimmer) instead of relying on a click
+        // listener to remove it.
+        // Taps are owned by binding.videoContainer.onTap (see onVideoSurfaceTapped).
 
-        binding.videoContainer.onZoomListener = object : ZoomableFrameLayout.OnZoomListener {
-            override fun onZoom(scale: Float, translationX: Float, translationY: Float) {
-                model.setZoom(scale, translationX, translationY)
-            }
-            
-            override fun onZoomReset() {
-                model.setZoom(1f, 0f, 0f)
-            }
-        }
+        binding.videoContainer.onZoomListener = videoZoomListener
+
+        binding.videoContainer.onTap = { onVideoSurfaceTapped() }
         
         binding.videoContainer.onGestureEnd = {
             // THE FIX: Only drop the force-open flag and auto-hide if the user was actually zooming.
@@ -550,8 +665,11 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {
                 isScrubbing = true
                 
-                binding.mainVideoView.visibility = android.view.View.GONE
-                binding.videoView.visibility = android.view.View.VISIBLE
+                // Image sequences are previewed on the image view; do not swap it out.
+                if (model.framesInput.value !is com.dan.timelapse.framesinput.ImagesFramesInput) {
+                    binding.mainVideoView.visibility = android.view.View.GONE
+                    binding.videoView.visibility = android.view.View.VISIBLE
+                }
                 
                 try {
                     if (binding.videoView.isPlaying) {
@@ -563,7 +681,11 @@ class MainActivity : AppCompatActivity() {
                 isScrubbing = false
                 lastScrubTime = System.currentTimeMillis()
                 val positionMs = slider.value.toLong()
-                (model.selectedFramePositionMs as? androidx.lifecycle.MutableLiveData<Long>)?.postValue(positionMs)
+                model.setSelectedFrameFromPicker(positionMs)
+                if (model.framesInput.value is com.dan.timelapse.framesinput.ImagesFramesInput) {
+                    binding.mainVideoView.visibility = android.view.View.VISIBLE
+                    binding.videoView.visibility = android.view.View.GONE
+                }
                 updateFramePreview(positionMs.toInt())
                 updateFrameInfoText(positionMs)
             }
@@ -574,8 +696,15 @@ class MainActivity : AppCompatActivity() {
         }
         
         binding.switchFullRes.isChecked = model.isFullResExportEnabled.value == true
+        model.isFullResExportEnabled.observe(this) { enabled ->
+            if (binding.switchFullRes.isChecked != enabled) {
+                binding.switchFullRes.isChecked = enabled
+            }
+        }
         binding.switchFullRes.setOnCheckedChangeListener { _, isChecked ->
-            model.isFullResExportEnabled.value = isChecked
+            if (model.isFullResExportEnabled.value != isChecked) {
+                model.isFullResExportEnabled.value = isChecked
+            }
         }
 
         model.rotation.observe(this) { degrees ->
@@ -606,13 +735,26 @@ class MainActivity : AppCompatActivity() {
 
         model.scanFileEvent.observe(this) { notifyGallery(File(it)) }
         model.trimRange.observe(this) { 
-            if (model.isProcessing.value != true && !model.isUserPaused) {
+            // Only restart the preview loop when a preview is already running.
+            // This prevents startPreviewLoop from firing during media load,
+            // before the MediaPlayer is prepared (which previously crashed).
+            if (model.isProcessing.value != true && !model.isUserPaused && playbackJob?.isActive == true) {
                 startPreviewLoop(10) 
             }
         }
         
         model.framesInput.observe(this) { input ->
             binding.emptyStateOverlay.visibility = if (input == null) View.VISIBLE else View.GONE
+            // With nothing loaded there is nothing to zoom: a pinch there only magnifies the
+            // empty-state copy. Touches still belong to the container so tap-to-open keeps
+            // working; only scale gestures are gated.
+            binding.videoContainer.isZoomGestureEnabled = input != null
+            if (input == null) {
+                // Nothing loaded: make sure a stale transform (e.g. a leftover pinch) cannot
+                // leave the empty-state copy magnified. post{} so the view has a size.
+                binding.videoContainer.post { binding.videoContainer.restoreZoom(1f, 0f, 0f) }
+                model.setZoom(1f, 0f, 0f)
+            }
         }
         
         model.isZoomToFill.observe(this) { _ ->
@@ -665,6 +807,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         model.triggerStudioProcess.observe(this) {
+            val suppressAutoSave = model.consumeAutoSaveSuppression()
             // FIX 3: Force media player cleanup on Main thread BEFORE heavy CPU work begins
             lifecycleScope.launch(Dispatchers.Main) {
                 try {
@@ -719,12 +862,15 @@ class MainActivity : AppCompatActivity() {
                     
                     set(OutputParams.KEY_WIDTH, width)
                     set(OutputParams.KEY_HEIGHT, height)
-                    set(OutputParams.KEY_FPS, model.previewFps.value ?: 30)
+                    set(OutputParams.KEY_FPS, model.outputFps.value ?: model.previewFps.value ?: 30)
+                    set(OutputParams.KEY_FILE_QUALITY, model.fileQuality.value ?: 50)
+                    set(OutputParams.KEY_PRESERVE_AUDIO, if (model.preserveAudio.value == true) 1 else 0)
                     set(OutputParams.KEY_H265, if (model.encodingH265.value == true) 1 else 0)
                     
                     set(OutputParams.KEY_STABILIZATION, if (model.isStabilized.value == true) 1 else 0)
                     set(OutputParams.KEY_ALIGN_TO_FIRST, if (model.alignToFirstFrame.value == true) 1 else 0)
-                    set(OutputParams.KEY_STABILIZATION_ZOOM, ((model.stabilizationZoom.value ?: 1.0f) * 100).toInt())
+                    set(OutputParams.KEY_STABILIZATION_ZOOM, ((model.stabilizationZoom.value ?: 1.05f) * 100).toInt())
+                    set(OutputParams.KEY_STABILIZATION_SMOOTHING, model.stabilizationSmoothing.value ?: 60)
                     
                     set("ROTATION_STATE", model.rotation.value ?: 0)
                     set("CROP_STATE", model.cropRatio.value?.ordinal ?: 0)
@@ -765,19 +911,25 @@ class MainActivity : AppCompatActivity() {
                     } else if (compareResult == OutputParams.COMPARE_CHANGED_ONLY_FPS) {
                         val inputPath = model.lastGeneratedFilePath ?: return@launch
                         val sourceFps = lastParams.get(OutputParams.KEY_FPS).coerceAtLeast(1)
-                        val targetFps = model.previewFps.value ?: 30
-                        val outputFile = File(cacheDir, "fps_remux_${System.currentTimeMillis()}.mp4")
-                        try {
-                            com.dan.timelapse.video.VideoTools.fastRemuxVideoSpeed(inputPath, outputFile.absolutePath, sourceFps, targetFps)
-                            model.setProcessedVideo(Uri.fromFile(outputFile))
-                            model.lastGeneratedFilePath = outputFile.absolutePath
-                            model.setLastProcessedParams(currentParams)
-                            showToast("FPS changed from ${sourceFps}fps to ${targetFps}fps")
-                        } catch (e: Exception) {
-                            showToast("FPS remux failed, using existing file")
-                            model.setProcessedVideo(Uri.fromFile(File(inputPath)))
+                        val targetFps = model.outputFps.value ?: model.previewFps.value ?: 30
+                        // The remux only rewrites timestamps; it does not resample audio.
+                        // With an audio track that desyncs/stutters, so re-render instead.
+                        if (com.dan.timelapse.video.VideoTools.hasAudioTrack(inputPath)) {
+                            Log.i("TimeLapse", "FPS change with audio track: full re-render (remux would desync audio)")
+                        } else {
+                            val outputFile = File(cacheDir, "fps_remux_${System.currentTimeMillis()}.mp4")
+                            try {
+                                com.dan.timelapse.video.VideoTools.fastRemuxVideoSpeed(inputPath, outputFile.absolutePath, sourceFps, targetFps)
+                                model.setProcessedVideo(Uri.fromFile(outputFile))
+                                model.lastGeneratedFilePath = outputFile.absolutePath
+                                model.setLastProcessedParams(currentParams)
+                                showToast("FPS changed from $sourceFps to $targetFps")
+                            } catch (e: Exception) {
+                                showToast("FPS remux failed, using existing file")
+                                model.setProcessedVideo(Uri.fromFile(File(inputPath)))
+                            }
+                            return@launch
                         }
-                        return@launch
                     }
                 }
                 
@@ -799,11 +951,20 @@ class MainActivity : AppCompatActivity() {
                 val paramsToSave = currentParams
                 
                 processingJob = model.viewModelScope.launch(Dispatchers.IO) {
+                // The preview loop was only *asked* to stop at the Generate click
+                // (stopPreviewLoop() just cancels, it does not wait). If it is still
+                // inside getFrame() the render would decode the same 16-bit TIFF/PNG
+                // sequence on a second thread at the same time. Wait for it here.
+                stopPreviewLoopAndJoin()
                 val currentEffect = model.visualEffect.value
                 val isMFSR = currentEffect == Effect.SUPER_RESOLUTION
                 // Diagnostic: log the render path decision for first-run troubleshooting
                 android.util.Log.d("RenderGuard", "Render trigger: currentEffect=$currentEffect, isMFSR=$isMFSR")
-                val fileExt = if (isMFSR) "jpg" else "mp4"
+                // A 16-bit TIFF/PNG sequence keeps its extra bit depth as far as the
+                // fusion input, so do not throw the result back through JPEG: PNG is
+                // lossless. (The fused accumulator itself is still 8-bit-valued.)
+                val losslessSource = model.framesInput.value?.isHighBitDepth == true
+                val fileExt = if (isMFSR) (if (losslessSource) "png" else "jpg") else "mp4"
                 val timestamp = System.currentTimeMillis()
                 val baseName = model.getFormattedExportName(fileExt).substringBeforeLast(".")
                 val outputFile = File(cacheDir, "${baseName}_${timestamp}.${fileExt}")
@@ -852,42 +1013,36 @@ class MainActivity : AppCompatActivity() {
                 }
                 
                 if (isMFSR) {
-                    val targetFrameIndex: Int
-                    val fps = input.fps.coerceAtLeast(1)
                     val totalFrames = input.size
-                    
-                    // Priority 1: Use Frame Selection position (explicit user choice from Tray 4)
-                    val frameSelectionMs = model.selectedFramePositionMs.value ?: 0L
-                    
-                    // Priority 2: Use center of Tray 1 trim range as fallback
+                    val lastIndex = (totalFrames - 1).coerceAtLeast(0)
+
+                    // Priority 1: the exact frame the user confirmed in the frame picker.
+                    // The ViewModel knows whether that position is an image index, a
+                    // source frame index, or milliseconds in a rendered preview.
+                    val pickedFrameIndex = model.resolveSelectedSourceFrameIndex()
+
+                    // Priority 2: center of the Tray 1 trim range.
                     val trimRange = model.trimRange.value
-                    
-                    targetFrameIndex = if (frameSelectionMs > 0L) {
-                        // User explicitly selected a frame in Frame Selection mode (Tray 4)
-                        ((frameSelectionMs / 1000.0) * fps).toInt().coerceIn(0, totalFrames - 1)
-                    } else if (trimRange != null) {
-                        // Fallback: use center of Tray 1 trim range
-                        val centerFrame = ((trimRange.first + trimRange.second) / 2).toInt()
-                        centerFrame.coerceIn(0, totalFrames - 1)
-                    } else {
-                        // Ultimate fallback: center of entire video
-                        (totalFrames / 2).coerceIn(0, totalFrames - 1)
-                    }
+
+                    val targetFrameIndex = pickedFrameIndex
+                        ?: if (trimRange != null) {
+                            ((trimRange.first + trimRange.second) / 2).toInt().coerceIn(0, lastIndex)
+                        } else {
+                            (totalFrames / 2).coerceIn(0, lastIndex)
+                        }
 
                     // NEW: Use clean MFSRProcessor. Works for both video and image sequences.
                     val videoUri = input.videoUri
                     
-                    // Adaptive scale factor based on device RAM
-                    val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                    val memInfo = android.app.ActivityManager.MemoryInfo()
-                    activityManager.getMemoryInfo(memInfo)
-                    val ramGB = memInfo.totalMem / (1024.0 * 1024.0 * 1024.0)
-                    val adaptiveScale = when {
-                        ramGB >= 8.0 -> 4.0f
-                        ramGB >= 6.0 -> 3.0f
-                        else -> 2.0f
-                    }
-                    Log.i("MFSR", "Device RAM: ${String.format("%.1f", ramGB)}GB → scale=${adaptiveScale}x")
+                    // Scale is chosen from free RAM AND from how many frames actually contribute.
+                    // 4x from 10 photos leaves most HR cells unsampled (measured 92% coverage,
+                    // 0.66 samples/px) — 2x is the honest maximum there. Long videos can reach 3x/4x.
+                    val contributingFrames = minOf(input.size, 120)
+                    val adaptiveScale = com.dan.timelapse.mfsr.MFSRProcessor.chooseScale(
+                        this@MainActivity, input.width, input.height, contributingFrames, 4.0f
+                    )
+                    Log.i("MFSR", "Scale decision: ${adaptiveScale}x for ${input.width}x${input.height}, " +
+                            "$contributingFrames contributing frames")
                     
                     // Pass trim bounds (0-based frame indices from ViewModel)
                     val trimStartIdx = (model.trimStart.value ?: 0).coerceAtLeast(0)
@@ -913,195 +1068,77 @@ class MainActivity : AppCompatActivity() {
                             trimEndFrame = trimEndIdx
                         )
                     }
+                    // Cancel must survive this Activity: the watcher below dies with
+                    // lifecycleScope, but process() keeps rendering. The processor polls
+                    // the ViewModel's flag directly through cancelCheck.
+                    mfsrProcessor.cancelCheck = { model.isProcessingCancelled.value == true }
                     
-                    // ── EtaCalibrator (persistent learning MFSR ETA) ──
-                    val etaCalibrator = EtaCalibrator(this@MainActivity)
-                    var mfsrPhaseStartMs = 0L
-                    var mfsrPrevPhase: MfsrPhase? = null
-                    val mfsrPhaseWallTimes = mutableMapOf<MfsrPhase, Long>()
-                    var mfsrScanSize = 0
-                    var mfsrFramesToProcess = 0
-
-                    // Snapshot device state at start of job
-                    val isPluggedIn = isDevicePluggedIn(this@MainActivity)
-                    val isStabOn = model.isStabilized.value == true
-                    val isSavingToSd = outputFile.absolutePath.contains("ext_sd", ignoreCase = true) ||
-                                       outputFile.absolutePath.contains("sdcard", ignoreCase = true)
-                    val isInputRaw = if (input is com.dan.timelapse.framesinput.ImagesFramesInput) {
-                        val firstName = input.name.lowercase()
-                        firstName.endsWith(".dng") || firstName.endsWith(".raw") || firstName.endsWith(".cr2") ||
-                        firstName.endsWith(".nef") || firstName.endsWith(".arw") || firstName.endsWith(".orf")
-                    } else false
-                    val sourceCodec = if (input is com.dan.timelapse.framesinput.VideoFramesInput) {
-                        val vUri = input.videoUri
-                        if (vUri != null) {
-                            try {
-                                val retriever = android.media.MediaMetadataRetriever()
-                                retriever.setDataSource(this@MainActivity, vUri)
-                                val mime = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
-                                retriever.release()
-                                when {
-                                    mime.contains("hevc", ignoreCase = true) || mime.contains("h265", ignoreCase = true) -> "hevc"
-                                    mime.contains("h264", ignoreCase = true) || mime.contains("avc", ignoreCase = true) -> "h264"
-                                    mime.contains("vp9", ignoreCase = true) -> "vp9"
-                                    mime.contains("av1", ignoreCase = true) -> "av1"
-                                    else -> "video"
-                                }
-                            } catch (e: Exception) { "video" }
-                        } else "none"
-                    } else "none"
-
-                    // Output resolution for MFSR = input * scaleFactor
+                    // ── Learned ETA ──────────────────────────────────────────────
+                    // The job spans scan -> align -> fuse -> finalize -> save. The
+                    // initial frame counts are an estimate; MFSRProcessor refines
+                    // them with planUnits() as soon as the real selection is known,
+                    // so this only has to be good enough for the scan phase.
                     val mfsrOutputW = (input.width * adaptiveScale).toInt()
                     val mfsrOutputH = (input.height * adaptiveScale).toInt()
-
-                    // Build unique keys for each phase using PhaseProfileKey
-                    val scanKey = PhaseProfileKey("mfsr_scan", isStabOn, isPluggedIn, false, isInputRaw, sourceCodec).build()
-                    val matricesKey = PhaseProfileKey("mfsr_matrices", isStabOn, isPluggedIn, false, isInputRaw, sourceCodec).build()
-                    val accumulateKey = PhaseProfileKey("mfsr_accumulate", isStabOn, isPluggedIn, false, isInputRaw, sourceCodec).build()
-                    val finalizeKey = PhaseProfileKey("mfsr_finalize", isStabOn, isPluggedIn, isSavingToSd, isInputRaw, sourceCodec).build()
-
-                    // Predict phase durations from past learning (or -1 if first run)
-                    // Scan/Matrices/Accumulate use Input Resolution; Finalize uses Output Resolution
-                    val scanPredicted = etaCalibrator.predictPhaseDurationMs(
-                        scanKey, input.width, input.height, input.size
+                    val mfsrScanWindow = minOf(
+                        input.size,
+                        com.dan.timelapse.mfsr.MFSRProcessor.SCAN_WINDOW_RADIUS * 2 + 1
+                    ).coerceAtLeast(1)
+                    // Selection keeps at least half the scan and is capped by the
+                    // per-input memory budget (50 above 1080p, 120 otherwise). The
+                    // processor refines this at runtime; using the raw scan window
+                    // here made the first scan phase predict ~10x too long.
+                    val mfsrSelectionEstimate = minOf(
+                        mfsrScanWindow,
+                        if (input.width.toLong() * input.height > 1920L * 1080L) 50 else 120
                     )
-                    val matricesPredicted = etaCalibrator.predictPhaseDurationMs(
-                        matricesKey, input.width, input.height, input.size
+                    val mfsrEtaSignature = com.dan.timelapse.eta.EtaApp.mfsrSignature(
+                        this@MainActivity, input.width, input.height, mfsrScanWindow, adaptiveScale
                     )
-                    val accumulatePredicted = etaCalibrator.predictPhaseDurationMs(
-                        accumulateKey, input.width, input.height, input.size
+                    val mfsrEtaSpec = com.dan.timelapse.eta.EtaSpecs.mfsrRender(
+                        signature = mfsrEtaSignature,
+                        scanFrames = mfsrScanWindow,
+                        selectedFrames = mfsrSelectionEstimate,
+                        inputWidth = input.width,
+                        inputHeight = input.height,
+                        outputWidth = mfsrOutputW,
+                        outputHeight = mfsrOutputH,
+                        temperatureC = com.dan.timelapse.eta.EtaApp
+                            .batteryTemperatureC(this@MainActivity)
                     )
-                    val finalizePredicted = etaCalibrator.predictPhaseDurationMs(
-                        finalizeKey, mfsrOutputW, mfsrOutputH, 1
+                    val mfsrEtaJob = try {
+                        com.dan.timelapse.eta.Eta.startJob(this@MainActivity, mfsrEtaSpec)
+                    } catch (e: Exception) {
+                        Log.w("EtaEngine", "Could not start MFSR ETA job", e)
+                        null
+                    }
+                    mfsrProcessor.etaJob = mfsrEtaJob
+                    Log.i(
+                        "EtaEngine",
+                        "mfsr job: predicted=${mfsrEtaJob?.predictedTotalMs?.toLong() ?: -1}ms " +
+                                "input=${input.width}x${input.height} scale=${adaptiveScale} " +
+                                "scan=$mfsrScanWindow samples=${mfsrEtaJob?.priorSamples ?: 0} " +
+                                "key=${mfsrEtaSignature.levelKey(0)}"
                     )
 
                     mfsrProcessor.onProgress = { current, total, status ->
                         if (currentRenderJobId == currentJobId) {
                             model.updateProcessingProgress(current, total)
                             if (status.isNotEmpty()) model.updateProcessingStatusText(status)
-
-                            val now = System.currentTimeMillis()
-                            val phase = when {
-                                status.contains("Extracting")  -> MfsrPhase.EXTRACT
-                                status.contains("Scanning")    -> MfsrPhase.SCAN
-                                status.contains("Calculating") -> MfsrPhase.MATRICES
-                                status.contains("Rendering")   -> MfsrPhase.ACCUMULATE
-                                status.contains("Generating") || status.contains("Saving") -> MfsrPhase.FINALIZE
-                                status.contains("Complete")    -> MfsrPhase.COMPLETE
-                                else -> MfsrPhase.SCAN
-                            }
-
-                            val fraction = try {
-                                Regex("(\\d+)/(\\d+)").find(status)
-                            } catch (_: Exception) { null }
-
-                            if (phase == MfsrPhase.SCAN && fraction != null)
-                                mfsrScanSize = fraction.groupValues[2].toInt()
-                            if ((phase == MfsrPhase.MATRICES || phase == MfsrPhase.ACCUMULATE) && fraction != null)
-                                mfsrFramesToProcess = fraction.groupValues[2].toInt()
-
-                            val prev = mfsrPrevPhase
-                            if (prev == null) {
-                                mfsrPhaseStartMs = now
-                            } else if (phase != prev) {
-                                val dur = now - mfsrPhaseStartMs
-                                mfsrPhaseWallTimes[prev] = dur
-                                mfsrPhaseStartMs = now
-
-                                // Record phase completion in calibrator
-                                // Use the right key and resolution per phase:
-                                // Scan/Matrices/Accumulate → input resolution
-                                // Finalize → output resolution (upscaled)
-                                val phaseKey: String
-                                val phaseW: Int
-                                val phaseH: Int
-                                val phaseFrameCount: Int
-                                when (prev) {
-                                    MfsrPhase.SCAN -> {
-                                        phaseKey = scanKey
-                                        phaseW = input.width
-                                        phaseH = input.height
-                                        phaseFrameCount = mfsrScanSize.coerceAtLeast(1)
-                                    }
-                                    MfsrPhase.MATRICES -> {
-                                        phaseKey = matricesKey
-                                        phaseW = input.width
-                                        phaseH = input.height
-                                        phaseFrameCount = mfsrFramesToProcess.coerceAtLeast(1)
-                                    }
-                                    MfsrPhase.ACCUMULATE -> {
-                                        phaseKey = accumulateKey
-                                        phaseW = input.width
-                                        phaseH = input.height
-                                        phaseFrameCount = mfsrFramesToProcess.coerceAtLeast(1)
-                                    }
-                                    MfsrPhase.FINALIZE -> {
-                                        phaseKey = finalizeKey
-                                        phaseW = mfsrOutputW
-                                        phaseH = mfsrOutputH
-                                        phaseFrameCount = 1
-                                    }
-                                    else -> {
-                                        phaseKey = ""
-                                        phaseW = 0
-                                        phaseH = 0
-                                        phaseFrameCount = 0
-                                    }
-                                }
-                                if (phaseKey.isNotEmpty()) {
-                                    etaCalibrator.recordPhaseCompletion(
-                                        phaseKey, dur, phaseW, phaseH, phaseFrameCount
-                                    )
-                                }
-                            }
-                            mfsrPrevPhase = phase
-
-                            // Compute remaining ETA using calibrator predictions
-                            var etaMs = -1L
-                            val a = fraction?.groupValues?.get(1)?.toIntOrNull() ?: 0
-                            val b = fraction?.groupValues?.get(2)?.toIntOrNull() ?: 0
-                            when (phase) {
-                                MfsrPhase.SCAN -> {
-                                    if (b > 0 && a > 0) {
-                                        etaMs = (b - a).toLong() * (now - mfsrPhaseStartMs) / a
-                                    }
-                                    if (b > 0 && matricesPredicted > 0) {
-                                        val pc = (mfsrScanSize.toDouble() / scanPredicted.coerceAtLeast(1L).toDouble())
-                                            .coerceIn(0.5, 2.0)
-                                        etaMs += (matricesPredicted * pc).toLong()
-                                        etaMs += (accumulatePredicted * pc).toLong()
-                                        etaMs += finalizePredicted.coerceAtLeast(0)
-                                    } else { etaMs = -1L }
-                                }
-                                MfsrPhase.MATRICES -> {
-                                    if (b > 0 && a > 0) {
-                                        etaMs = (b - a).toLong() * (now - mfsrPhaseStartMs) / a
-                                    }
-                                    if (accumulatePredicted > 0) {
-                                        etaMs += accumulatePredicted
-                                        etaMs += finalizePredicted.coerceAtLeast(0)
-                                    } else { etaMs = -1L }
-                                }
-                                MfsrPhase.ACCUMULATE -> {
-                                    if (b > 0 && a > 0) {
-                                        etaMs = (b - a).toLong() * (now - mfsrPhaseStartMs) / a
-                                    }
-                                    etaMs += if (finalizePredicted > 0) finalizePredicted else 3000L
-                                }
-                                MfsrPhase.FINALIZE -> {
-                                    etaMs += if (finalizePredicted > 0)
-                                        (finalizePredicted * 2.0 / 3.0).toLong().coerceAtLeast(1000)
-                                    else 3000L
-                                }
-                                MfsrPhase.COMPLETE -> etaMs = 0L
-                                else -> etaMs = -1L
-                            }
-                            model.updateEstimatedTimeRemaining(etaMs)
+                            model.updateEstimatedTimeRemaining(mfsrEtaJob?.remainingMs() ?: -1L)
                         } else {
                             model.updateProcessingProgress(current, total)
                             if (status.isNotEmpty()) model.updateProcessingStatusText(status)
                             model.updateEstimatedTimeRemaining(-1L)
+                        }
+                    }
+                    // Cancel must be LIVE: writing isCancelled once before process()
+                    // left the button inert for the whole render (the loop has no
+                    // suspension points, so cancelling the job cannot interrupt it).
+                    val cancelWatch = lifecycleScope.launch(Dispatchers.Main) {
+                        while (isActive) {
+                            mfsrProcessor.isCancelled = model.isProcessingCancelled.value == true
+                            kotlinx.coroutines.delay(100)
                         }
                     }
                     mfsrProcessor.isCancelled = model.isProcessingCancelled.value == true
@@ -1113,15 +1150,19 @@ class MainActivity : AppCompatActivity() {
                     val success = try {
                         mfsrProcessor.process(outputFile)
                     } finally {
+                        cancelWatch.cancel()
                         if (wakeLock.isHeld) wakeLock.release()
                     }
 
-                    // Log learned timings (EtaCalibrator persists via SharedPreferences automatically)
-                    if (success && mfsrPhaseWallTimes.isNotEmpty()) {
-                        Log.i("MFSR_ETA", "Learned timings for ${input.width}x${input.height} " +
-                            "(stab=$isStabOn, pwr=$isPluggedIn, sd=$isSavingToSd, raw=$isInputRaw): " +
-                            mfsrPhaseWallTimes.entries.joinToString(" ") { "${it.key.name.lowercase()}=${it.value}ms" })
+                    // Close the learned job: only a successful, non-cancelled render
+                    // is allowed to train the model (a cancel point says nothing about
+                    // how long the work would have taken).
+                    if (success && model.isProcessingCancelled.value != true) {
+                        mfsrEtaJob?.finish(true)
+                    } else {
+                        mfsrEtaJob?.abandon()
                     }
+                    Log.i("EtaEngine", "mfsr done: success=$success ${mfsrEtaJob?.summaryLine() ?: ""}")
 
                     withContext(Dispatchers.Main) {
                         dismissGenerateDialog()
@@ -1134,6 +1175,7 @@ class MainActivity : AppCompatActivity() {
                             val videoUri = input.videoUri
                             if (videoUri != null) {
                                 try {
+                                    activeMediaPlayer = null
                                     binding.videoView.setVideoURI(videoUri)
                                     binding.videoView.setOnPreparedListener { mp ->
                                         mp.isLooping = true
@@ -1149,20 +1191,42 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                         
-                        if (success && outputFile.exists()) {
+                        if (model.isProcessingCancelled.value == true) {
+                            model.setSaveReady(false)
+                        }
+
+                        if (success) {
+                            // A 16-bit render is written to a sibling .png (a JPEG
+                            // target would clip CV_16U to white), so trust the file the
+                            // processor actually wrote, not the requested path.
+                            val writtenFile = mfsrProcessor.writtenOutputFile ?: outputFile
+                            if (!writtenFile.exists()) {
+                                Log.e("TimeLapse", "Render reported success but ${writtenFile.name} is missing")
+                            }
                             try {
                                 val toneGen = android.media.ToneGenerator(android.media.AudioManager.STREAM_NOTIFICATION, 100)
                                 toneGen.startTone(android.media.ToneGenerator.TONE_PROP_BEEP, 200)
                                 toneGen.release()
                             } catch (e: Exception) {}
                             
-                            model.setProcessedImageUri(Uri.fromFile(outputFile))
+                            model.setProcessedImageUri(Uri.fromFile(writtenFile))
+                            // The previous video render belongs to another effect; it must
+                            // not be reused by the frame picker or the Save/Share buttons.
+                            model.setProcessedVideo(null)
                             model.setLastProcessedParams(paramsToSave)
                             
-                            // MFSR: Always auto-save. The image is the whole point — don't lose it.
-                            if (isMFSR || model.autoSaveAfterRender.value == true) {
+                            // Auto-save is the user's choice and applies to EVERY render,
+                            // including Super Resolution. (It used to be forced for MFSR,
+                            // so the switch silently did nothing for that effect.)
+                            if (!suppressAutoSave && model.autoSaveAfterRender.value == true) {
+                                // The extension follows writtenFile, not this name: a
+                                // 16-bit render is saved as PNG even though the label says jpg.
                                 val fileName = model.getFormattedExportName("jpg")
-                                model.saveFileToGalleryAsImage(outputFile, fileName)
+                                model.saveFileToGalleryAsImage(writtenFile, fileName)
+                            } else if (isMFSR) {
+                                // Auto-save is off — leave the render in the Save tab so it
+                                // is still one tap away instead of silently disappearing.
+                                showToast("Super-resolution image ready — tap Save to keep it")
                             }
                             
                         } else if (model.isProcessingCancelled.value != true) {
@@ -1170,16 +1234,29 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 } else {
+                var renderCompleted = false
                 try {
                     val success = processor.startRendering(outputFile.absolutePath)
+                    renderCompleted = success
                     // THE FIX: Read cancellation from model (live check)
                     val wasCancelled = model.isProcessingCancelled.value == true
+
+                    // The render loop and the retime are done; the job is still open
+                    // because the audio mux and the gallery write below are part of
+                    // the same work and are what the old ETA reported as "0s left".
+                    val etaJob = processor.etaJob
+                    etaJob?.beginPhase(com.dan.timelapse.eta.EtaPhase.MUX, 1.0)
                     
                     withContext(Dispatchers.Main) {
                         dismissGenerateDialog()
                         model.isProcessing.postValue(false)
 
                         // THE FIX: Handle partial renders (cancelled but had frames)
+                        if (wasCancelled) {
+                            // A partial file is for viewing only; never let Save/Share
+                            // pick up the half-finished output.
+                            model.setSaveReady(false)
+                        }
                         if (wasCancelled && success && outputFile.exists() && outputFile.length() > 0) {
                             // Keep partial in cache for UI playback only. No toast, no device save.
                             // Delete on next Generate click.
@@ -1210,6 +1287,9 @@ class MainActivity : AppCompatActivity() {
                             
                             // notifyGallery removed — saveVideoToGallery() below handles gallery visibility
                             model.setProcessedVideo(Uri.fromFile(outputFile))
+                            // A previous MFSR/still render is no longer what the user is
+                            // looking at; don't let Save Image write it.
+                            model.setProcessedImageUri(null)
                             
                             if (model.preserveAudio.value == true) {
                                 val input = model.framesInput.value
@@ -1218,22 +1298,34 @@ class MainActivity : AppCompatActivity() {
                                     if (sourceUri != null) {
                                         // showToast("Syncing audio to time-lapse...")
                                         val speedMultiplier = model.speedMultiplier.value ?: 1
-                            val targetFps = model.outputFps.value ?: model.previewFps.value ?: 30
+                                        val outputFps = (model.outputFps.value ?: 30).coerceAtLeast(1)
                                         val sourceFps = input.fps.coerceAtLeast(1)
-                                        val speedFactor = speedMultiplier.toFloat() * targetFps.toFloat() / sourceFps.toFloat()
-                                        
-                                        // FIX Bug E: Pass the ACTUAL trim boundary of the original video to the extractor
-                                        // The generated duration is artificially short due to speedup; we need full original range
+
+                                        // Derive the audio stretch from the frame counts that
+                                        // were ACTUALLY encoded. speedMultiplier alone is wrong
+                                        // for stacking effects: they consume every frame and
+                                        // produce one output per input, so nothing is skipped.
+                                        val renderedFrames = model.lastGeneratedFrameCount
                                         val trimStartMs = model.getTrimStartMs()
-                                        val effectiveTrimEndMs = model.getTrimEndMs()
-                                        
+                                        var trimEndMs = model.getTrimEndMs()
+                                        if (trimEndMs == Long.MAX_VALUE || trimEndMs <= trimStartMs) {
+                                            trimEndMs = input.size.toLong() * 1000L / sourceFps
+                                        }
+                                        val sourceDurationMs = (trimEndMs - trimStartMs).coerceAtLeast(1L)
+                                        val renderedDurationMs = renderedFrames * 1000.0 / outputFps
+                                        val speedFactor = if (renderedFrames > 0 && renderedDurationMs > 0.0) {
+                                            (sourceDurationMs / renderedDurationMs).toFloat()
+                                        } else {
+                                            speedMultiplier.toFloat() * outputFps.toFloat() / sourceFps.toFloat()
+                                        }.coerceIn(0.01f, 100f)
+
                                         val muxSuccess = com.dan.timelapse.video.VideoTools.muxTimeScaledAudio(
                                             this@MainActivity,
                                             sourceUri,
                                             outputFile,
                                             speedFactor,
                                             trimStartMs,
-                                            effectiveTrimEndMs
+                                            trimEndMs
                                         )
                                         if (muxSuccess) {
                                             model.setProcessedVideo(android.net.Uri.fromFile(outputFile))
@@ -1247,12 +1339,22 @@ class MainActivity : AppCompatActivity() {
                             
                             model.setLastProcessedParams(paramsToSave)
 
-                            if (model.autoSaveAfterRender.value == true) {
+                            // Mux is finished; the gallery write is the last real phase.
+                            etaJob?.beginPhase(com.dan.timelapse.eta.EtaPhase.SAVE, 1.0)
+                            if (!suppressAutoSave && model.autoSaveAfterRender.value == true) {
                                 val fileName = model.getFormattedExportName("mp4")
                                 model.saveVideoToGallery(fileName)
                             }
                         } else if (!wasCancelled) {
-                            showToast("Processing Failed")
+                            // Nothing was published: lastGeneratedFilePath already
+                            // points at the new (deleted) file, so Save/Share must not
+                            // pretend there is something to export.
+                            model.setSaveReady(false)
+                            model.lastGeneratedFilePath = null
+                            // The renderer knows exactly why it refused (a clip that
+                            // would produce a single 0-second frame, a degenerate
+                            // container); "Processing Failed" hid that.
+                            showToastLong(processor.failureMessage ?: "Processing Failed")
                         }
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1260,7 +1362,21 @@ class MainActivity : AppCompatActivity() {
                         dismissGenerateDialog()
                         model.isProcessing.postValue(false)
                     }
+                    processor.etaJob?.abandon()
                     throw e
+                } finally {
+                    // Only a complete, uncancelled render is a usable timing sample.
+                    val job = processor.etaJob
+                    if (job != null) {
+                        if (renderCompleted && model.isProcessingCancelled.value != true) {
+                            job.finish(true)
+                            Log.i("EtaEngine", "video done: ${job.summaryLine()}")
+                        } else {
+                            job.abandon()
+                            Log.i("EtaEngine", "video abandoned: completed=$renderCompleted " +
+                                    "cancelled=${model.isProcessingCancelled.value}")
+                        }
+                    }
                 }
                 }
             }
@@ -1277,33 +1393,14 @@ class MainActivity : AppCompatActivity() {
                     return@observe
                 }
 
-                val selectedFrameMs = model.selectedFramePositionMs.value
-                var targetFrameIndex = (input.size / 2).coerceIn(0, input.size - 1)
-
-                if (selectedFrameMs != null) {
-                    val hasRenderedVideo = model.processedVideoUri.value != null
-                    
-                    if (hasRenderedVideo) {
-                        val outFps = model.outputFps.value ?: 30
-                        val renderedFrameIndex = ((selectedFrameMs / 1000.0) * outFps).toInt()
-                        
-                        val skipFrames = model.skipFrames.value ?: 1
-                        val originalStartFrame = if (input is ImagesFramesInput) {
-                            (model.trimRange.value?.first?.toInt()?.coerceAtLeast(1) ?: 1) - 1
-                        } else {
-                            val trimStartMs = model.getTrimStartMs()
-                            ((trimStartMs / 1000.0) * input.fps.coerceAtLeast(1)).toInt().coerceAtLeast(0)
-                        }
-                        
-                        targetFrameIndex = (originalStartFrame + (renderedFrameIndex * skipFrames)).coerceIn(0, input.size - 1)
-                    } else {
-                        targetFrameIndex = selectedFrameMs.toInt().coerceIn(0, input.size - 1)
-                    }
-                }
+                val pickedFrameIndex = model.resolveSelectedSourceFrameIndex()
+                val targetFrameIndex = pickedFrameIndex
+                    ?: (input.size / 2).coerceIn(0, (input.size - 1).coerceAtLeast(0))
 
                 // 1. Setup the Dialog UI
                 val dialogView = layoutInflater.inflate(R.layout.dialog_generate, null)
-                dialogView.findViewById<android.widget.TextView>(R.id.dialogTitle)?.text = "Rendering Full-Res Image"
+                val fullResTitle = dialogView.findViewById<android.widget.TextView>(R.id.dialogTitle)
+                fullResTitle?.text = "Rendering Full-Res Image"
                 dialogView.findViewById<android.view.View>(R.id.btnCancel)?.visibility = android.view.View.GONE
                 
                 val progressText = dialogView.findViewById<android.widget.TextView>(R.id.progressText)
@@ -1329,9 +1426,14 @@ class MainActivity : AppCompatActivity() {
                 model.renderProgress.observe(this@MainActivity, progressObserver)
                 
                 // 3. Bulletproof Coroutine
+                var fullResEtaJob: com.dan.timelapse.eta.EtaJob? = null
                 lifecycleScope.launch(Dispatchers.IO) {
                     var success = false
                     val tempImageFile = File(cacheDir, "full_res_render_${System.currentTimeMillis()}.jpg")
+                    // The MFSR processor redirects a 16-bit result to a sibling .png (a
+                    // JPEG target clips CV_16U to white). Everything below must use the
+                    // file it actually wrote, not the requested path.
+                    var outputImageFile = tempImageFile
                     
                     try {
                         val videoUri = input.videoUri
@@ -1372,11 +1474,53 @@ class MainActivity : AppCompatActivity() {
                                     trimEndFrame = trimEndIdx
                                 )
                             }
+                            mfsrProcessor.cancelCheck = { model.isProcessingCancelled.value == true }
+
+                            // Learned ETA for the still export, using the same phase
+                            // plan as the main Super Resolution render.
+                            val stillScanWindow = minOf(
+                                input.size,
+                                com.dan.timelapse.mfsr.MFSRProcessor.SCAN_WINDOW_RADIUS * 2 + 1
+                            ).coerceAtLeast(1)
+                            val stillOutputW = (input.width * adaptiveScale).toInt()
+                            val stillOutputH = (input.height * adaptiveScale).toInt()
+                            val stillEtaJob = try {
+                                Eta.startJob(
+                                    this@MainActivity,
+                                    EtaSpecs.mfsrRender(
+                                        signature = EtaApp.mfsrSignature(
+                                            this@MainActivity, input.width, input.height,
+                                            stillScanWindow, adaptiveScale
+                                        ),
+                                        scanFrames = stillScanWindow,
+                                        selectedFrames = minOf(
+                                            stillScanWindow,
+                                            if (input.width.toLong() * input.height > 1920L * 1080L) 50 else 120
+                                        ),
+                                        inputWidth = input.width,
+                                        inputHeight = input.height,
+                                        outputWidth = stillOutputW,
+                                        outputHeight = stillOutputH,
+                                        temperatureC = EtaApp.batteryTemperatureC(this@MainActivity)
+                                    )
+                                )
+                            } catch (e: Exception) { null }
+                            mfsrProcessor.etaJob = stillEtaJob
+                            fullResEtaJob = stillEtaJob
+                            runOnUiThread {
+                                fullResTitle?.text = com.dan.timelapse.eta.EtaDialogText.titleForMs(
+                                    "Rendering Full-Res Image",
+                                    stillEtaJob?.remainingMs() ?: -1L
+                                )
+                            }
+
                             mfsrProcessor.onProgress = { current, total, status ->
+                                val remaining = stillEtaJob?.remainingMs() ?: -1L
                                 runOnUiThread {
                                     val percent = if (total > 0) (current * 100 / total) else 0
                                     progressBar?.progress = percent
-                                    progressText?.text = status
+                                    progressText?.text = com.dan.timelapse.eta.EtaDialogText
+                                        .statusWithEta(status, remaining)
                                     model.updateRenderProgress(percent)
                                 }
                             }
@@ -1386,17 +1530,50 @@ class MainActivity : AppCompatActivity() {
                             wakeLock.acquire(30 * 60 * 1000L)
                             try {
                                 success = mfsrProcessor.process(tempImageFile)
+                                mfsrProcessor.writtenOutputFile?.let { outputImageFile = it }
                             } finally {
                                 if (wakeLock.isHeld) wakeLock.release()
                             }
                         } else {
                             // PATH B: Use VideoProcessor to render selected effect at high resolution
                             val processor = com.dan.timelapse.VideoProcessor(model, this@MainActivity, input.width, input.height)
+
+                            // A still is a short job, so the learned number is mostly
+                            // useful as a "how long will this take" before the first
+                            // frame lands. It is trained like every other phase.
+                            val stillUnits = com.dan.timelapse.eta.EtaUnits.stillUnits(
+                                input.width, input.height
+                            )
+                            val stillEtaJob = try {
+                                Eta.startJob(
+                                    this@MainActivity,
+                                    EtaSpecs.stillRender(
+                                        signature = EtaApp.stillSignature(
+                                            this@MainActivity, currentEffect.name,
+                                            input.width, input.height
+                                        ),
+                                        outWidth = input.width,
+                                        outHeight = input.height,
+                                        temperatureC = EtaApp.batteryTemperatureC(this@MainActivity)
+                                    )
+                                )
+                            } catch (e: Exception) { null }
+                            fullResEtaJob = stillEtaJob
+                            stillEtaJob?.beginPhase(EtaPhase.RENDER, stillUnits)
+                            runOnUiThread {
+                                fullResTitle?.text = com.dan.timelapse.eta.EtaDialogText.titleForMs(
+                                    "Rendering Full-Res Image",
+                                    stillEtaJob?.remainingMs() ?: -1L
+                                )
+                            }
+
                             processor.onProgress = { current, total ->
                                 val percent = if (total > 0) (current * 100 / total) else 0
+                                val remaining = stillEtaJob?.remainingMs() ?: -1L
                                 runOnUiThread {
                                     progressBar?.progress = percent
-                                    progressText?.text = "Processing... $percent%"
+                                    progressText?.text = com.dan.timelapse.eta.EtaDialogText
+                                        .statusWithEta("Processing... $percent%", remaining)
                                     model.updateRenderProgress(percent)
                                 }
                             }
@@ -1421,32 +1598,35 @@ class MainActivity : AppCompatActivity() {
                             showToast("Error processing high-res image.")
                         }
                     } finally {
+                        val job = fullResEtaJob
+                        if (job != null) {
+                            if (success) job.finish(true) else job.abandon()
+                            Log.i("EtaEngine", "still done: success=$success ${job.summaryLine()}")
+                        }
                         withContext(Dispatchers.Main) {
                             model.renderProgress.removeObserver(progressObserver)
                             fullResDialog.dismiss()
                             
-                            if (success && tempImageFile.exists()) {
-                                model.setProcessedImageUri(Uri.fromFile(tempImageFile))
+                            if (success && outputImageFile.exists()) {
+                                model.setProcessedImageUri(Uri.fromFile(outputImageFile))
                                 
                                 if (model.pendingFullResAction == "SAVE") {
-                                    if (model.autoSaveAfterRender.value == true) {
-                                        val rawName = model.getFormattedExportName("jpg").replace(".jpg", "_RAW.jpg")
-                                        model.saveFileToGalleryAsImage(tempImageFile, rawName)
-                                        
-                                        model.experimentalRefinedUri?.path?.let { refinedPath ->
-                                            val refinedFile = java.io.File(refinedPath)
-                                            if (refinedFile.exists()) {
-                                                val refinedName = rawName.replace("_RAW", "_REFINED")
-                                                model.saveFileToGalleryAsImage(refinedFile, refinedName)
-                                                model.experimentalRefinedUri = null 
-                                            }
+                                    // This branch IS the Save button. It must save regardless of
+                                    // the unrelated "auto-save after Generate" preference.
+                                    val imageName = model.getFormattedExportName("jpg")
+                                    model.saveFileToGalleryAsImage(outputImageFile, imageName)
+
+                                    model.experimentalRefinedUri?.path?.let { refinedPath ->
+                                        val refinedFile = java.io.File(refinedPath)
+                                        if (refinedFile.exists()) {
+                                            val refinedName = imageName.replace(".jpg", "_REFINED.jpg")
+                                            model.saveFileToGalleryAsImage(refinedFile, refinedName)
+                                            model.experimentalRefinedUri = null
                                         }
-                                        showToast("A/B Test Images saved to Pictures/TimeLapse")
-                                    } else {
-                                        showToast("Render complete")
                                     }
+                                    showToast("Full-res image saved to Pictures/TimeLapse")
                                 } else if (model.pendingFullResAction == "SHARE") {
-                                    shareFileUri(tempImageFile)
+                                    shareFileUri(outputImageFile)
                                 } else {
                                     showToast("Full Res Render Complete")
                                 }
@@ -1499,6 +1679,8 @@ class MainActivity : AppCompatActivity() {
                         binding.videoView.pause()
                     }
                 } catch (e: Exception) {}
+                
+                activeMediaPlayer = null
                 
                 binding.videoView.setVideoURI(uri)
                 binding.videoView.setOnPreparedListener { mp ->
@@ -1656,35 +1838,42 @@ class MainActivity : AppCompatActivity() {
                 val dialogTitle = dialog.findViewById<TextView>(R.id.dialogTitle)
                 val isStabilizing = model.isStabilized.value == true
                 val prefix = if (isStabilizing) "Stabilizing & Rendering" else "Rendering"
-                if (timeEstimate != null && timeEstimate.isNotEmpty()) {
-                    dialogTitle?.text = "$prefix ($timeEstimate)"
-                } else {
-                    dialogTitle?.text = prefix
-                }
+                // The string is built by a unit-tested helper: the title is the only
+                // place the estimate reaches the user.
+                val title = EtaDialogText.title(prefix, timeEstimate)
+                dialogTitle?.text = title
+                Log.d("EtaEngine", "dialog title: $title")
             }
         }
         
         binding.emptyStateOverlay.visibility = if (model.framesInput.value == null) View.VISIBLE else View.GONE
         
-        binding.emptyStateOverlay.setOnClickListener {
-            model.setLastSourceType(MainViewModel.SourceType.VIDEO)
-            openPicker()
-        }
-        
-        binding.videoContainer.setOnClickListener {
-            if (model.framesInput.value == null) {
-                model.setLastSourceType(MainViewModel.SourceType.VIDEO)
-                openPicker()
-            }
-        }
+        // The whole-media surface (empty state included) is handled by
+        // binding.videoContainer.onTap -> onVideoSurfaceTapped(). Click listeners here would be
+        // dead code because ZoomableFrameLayout intercepts every touch.
     }
 
     override fun onPause() {
         super.onPause()
-        if (model.framesInput.value != null) {
+        // Never persist a share session: its grant is one-shot and dies with this task.
+        if (model.framesInput.value != null && !isSharedMediaSession) {
             model.saveSession(this)
         }
         trimWatchdogHandler.removeCallbacks(trimWatchdogRunnable)
+    }
+
+    /**
+     * A second share while the app is already running reuses this instance
+     * (`android:launchMode="singleTop"`), so the payload has to be handled here too.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val payload = parseShareIntent(intent) ?: return
+        model.shareIntentConsumed = true
+        loadingJob?.cancel()
+        isFrameSelectionMode = false
+        loadSharedPayload(payload)
     }
 
     override fun onStop() {
@@ -1707,48 +1896,34 @@ class MainActivity : AppCompatActivity() {
         trimWatchdogHandler.post(trimWatchdogRunnable)
     }
 
+    override fun onPostResume() {
+        super.onPostResume()
+        // The mask editor disables zoom/pan and swaps the zoom listener, while
+        // isMaskEditMode is a plain field (not persisted). An activity recreated while
+        // the editor was open could therefore come back with a dead media surface.
+        //
+        // This check MUST live here, not in onCreate: in onCreate the container's flag
+        // was always still true (MaskEditFragment's onViewCreated, which disables zoom,
+        // has not run yet), so the old onCreate block could never fire.
+        if (!binding.videoContainer.isZoomEnabled) {
+            Log.w("TimeLapse", "Media surface restored with zoom disabled — restoring")
+            isMaskEditMode = false
+            binding.maskOverlay.visibility = View.GONE
+            binding.bottomNavigation.visibility = View.VISIBLE
+            restoreMediaSurfaceAfterMaskEditor()
+            updateDimmer()
+        }
+    }
+
     private fun initGlobalGestures() {
         gestureDetector = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
             override fun onDown(e: MotionEvent): Boolean {
                 return false
             }
 
-            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                // Don't handle taps in mask edit mode
-                if (isMaskEditMode || isFrameSelectionMode) return false
-                
-                // Check if tap is inside visible tray - if so, don't dismiss
-                if (isTrayVisible) {
-                    val trayLocation = IntArray(2)
-                    binding.trayContainer.getLocationOnScreen(trayLocation)
-                    if (e.rawY >= trayLocation[1]) {
-                        return false  // Let tray handle its own taps
-                    }
-                }
-                
-                val videoContainerRect = Rect()
-                binding.videoContainer.getGlobalVisibleRect(videoContainerRect)
-                val navRect = Rect()
-                binding.bottomNavigation.getGlobalVisibleRect(navRect)
-                
-                if (videoContainerRect.contains(e.rawX.toInt(), e.rawY.toInt()) && 
-                    !navRect.contains(e.rawX.toInt(), e.rawY.toInt())) {
-                    
-                    if (model.framesInput.value == null) {
-                        showSourceTray()
-                        return true
-                    }
-                    
-                    // THE FIX: If tray is open, clicking video ONLY hides the tray (does not pause/play)
-                    if (isTrayVisible) {
-                        hideTray()
-                    } else {
-                        togglePlayback()
-                    }
-                    return true
-                }
-                return false
-            }
+            // Single taps on the media are owned by binding.videoContainer.onTap
+            // (onVideoSurfaceTapped). Handling them here too would double-fire, and the
+            // container already knows whether the gesture was a tap or the start of one.
 
             override fun onFling(e1: MotionEvent?, e2: MotionEvent, vX: Float, vY: Float): Boolean {
                 if (model.isProcessing.value == true || isMaskEditMode) return false
@@ -1824,6 +1999,14 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun updateDimmer() {
+        // Never dim the canvas while the user is painting a mask: the 10% black scrim
+        // sits ABOVE maskOverlay, so it both hides true colours and (with the old
+        // click listener gone) makes a stray tap paint a permanent dot the user
+        // cannot see clearly.
+        if (isMaskEditMode) {
+            binding.dimmerView.visibility = View.GONE
+            return
+        }
         val zoomScale = model.zoomFactor.value ?: 1f
         val isZoomed = zoomScale != 1.0f
         
@@ -2109,6 +2292,8 @@ class MainActivity : AppCompatActivity() {
                 applyVideoRotation(model.rotation.value ?: 0)
                 applyVideoAspectRatio(null)
 
+                activeMediaPlayer = null
+
                 binding.videoView.setVideoURI(processedUri)
                 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true
@@ -2142,7 +2327,7 @@ class MainActivity : AppCompatActivity() {
                     isPlayingOriginalVideo = true
                     binding.videoContainer.isEnabled = true
                     showTabStatusToast("Original")
-                    if (input is VideoFramesInput) binding.videoView.setVideoURI(input.videoUri)
+                    if (input is VideoFramesInput) { activeMediaPlayer = null; binding.videoView.setVideoURI(input.videoUri) }
                     true
                 }
             } else {
@@ -2156,6 +2341,7 @@ class MainActivity : AppCompatActivity() {
                     binding.videoContainer.isEnabled = true
                     applyVideoRotation(model.rotation.value ?: 0)
                     applyVideoAspectRatio(model.transformState.value?.getAspectRatio())
+                    activeMediaPlayer = null
                     binding.videoView.setVideoURI(input.videoUri)
 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true
@@ -2215,13 +2401,13 @@ binding.videoView.setOnPreparedListener { mp ->
     }
 
     private fun onFileSelected(uri: Uri) {
+        isSharedMediaSession = false
         val currentUri = model.framesInput.value?.videoUri
         if (currentUri != null && currentUri.toString() == uri.toString()) {
             return
         }
         
         persistUriPermission(uri)
-        model.saveSession(this)
 
         showLoadingDialog("Loading video...")
         
@@ -2230,11 +2416,17 @@ binding.videoView.setOnPreparedListener { mp ->
                 val input = withContext(Dispatchers.IO) {
                     VideoFramesInput(UriFile.fromSingleUri(this@MainActivity, uri)!!)
                 }
+                activeMediaPlayer = null
                 model.setFramesInput(input)
+                // Save only now: saveSession() reads framesInput.videoUri, so saving before
+                // setFramesInput() persisted a null URI and the session never restored.
+                model.saveSession(this@MainActivity)
                 binding.videoView.isVisible = true
                 binding.mainVideoView.isVisible = false
                 applyVideoRotation(model.rotation.value ?: 0)
                 applyVideoAspectRatio(model.transformState.value?.getAspectRatio())
+                
+                activeMediaPlayer = null
                 
                 binding.videoView.setVideoURI(input.videoUri)
                 binding.videoView.setOnPreparedListener { mp ->
@@ -2263,17 +2455,28 @@ binding.videoView.setOnPreparedListener { mp ->
     }
 
     private fun onImagesSelected(uris: List<Uri>) {
+        isSharedMediaSession = false
         uris.forEach { persistUriPermission(it) }
-        model.saveSession(this)
 
         showLoadingDialog("Loading ${uris.size} images...")
 
         loadingJob = lifecycleScope.launch {
             try {
                 val input = withContext(Dispatchers.IO) {
-                    ImagesFramesInput(uris.map { UriFile.fromSingleUri(this@MainActivity, it)!! }, model)
+                    ImagesFramesInput(
+                        uris.map { UriFile.fromSingleUri(this@MainActivity, it)!! },
+                        model,
+                        onProgress = { current, total, status ->
+                            // Probing a big batch is the slowest part of opening
+                            // images; without this the dialog sat on "Please wait..."
+                            runOnUiThread { updateLoadingDialog(current, total, status) }
+                        }
+                    )
                 }
+                activeMediaPlayer = null
                 model.setFramesInput(input)
+                // After setFramesInput, so lastMediaUri is the first image, not null.
+                model.saveSession(this@MainActivity)
                 binding.videoView.isVisible = false
                 binding.mainVideoView.isVisible = true
                 binding.videoSeekBar.max = input.size - 1
@@ -2287,7 +2490,229 @@ binding.videoView.setOnPreparedListener { mp ->
         }
     }
 
+    // ───────────────────────── Share-sheet intake ─────────────────────────
+    //
+    // The manifest has advertised ACTION_SEND / SEND_MULTIPLE for a long time, but nothing
+    // ever read the incoming intent, and the picker path required DocumentFile columns that
+    // Google Photos' cloud provider does not answer. Both are fixed here: the payload is read
+    // from EXTRA_STREAM *or* ClipData, and image bytes are copied to cache before loading.
+
+    /**
+     * Parse a share/view intent. Returns null for a normal launcher start or an unsupported
+     * payload (text/plain, PDF, ...), so callers can fall through to the normal startup.
+     */
+    private fun parseShareIntent(intent: Intent?): SharePayload? {
+        if (intent == null) return null
+        val action = intent.action ?: return null
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE &&
+            action != Intent.ACTION_VIEW
+        ) return null
+
+        // EXTRA_STREAM is a Uri for SEND, a ParcelableArrayList<Uri> for SEND_MULTIPLE, and
+        // some senders omit it entirely and rely on ClipData. Read it as Any and branch:
+        // getParcelableExtra / getParcelableArrayListExtra each fail for the other shape.
+        val raw = intent.extras?.get(Intent.EXTRA_STREAM)
+        val single = (raw as? Uri)?.toString()
+            ?: if (action == Intent.ACTION_VIEW) intent.data?.toString() else null
+        val list = (raw as? List<*>)?.filterIsInstance<Uri>()?.map { it.toString() }
+        val clip = intent.clipData?.let { c ->
+            (0 until c.itemCount).map { c.getItemAt(it).uri.toString() }
+        }
+
+        val merged = ShareIntentRules.mergeStreams(single, list, clip).map(Uri::parse)
+        if (merged.isEmpty()) {
+            Log.w("TimeLapse", "Share intent had no stream: action=$action type=${intent.type}")
+            return null
+        }
+
+        val first = merged.first()
+        val isDirectory = merged.size == 1 && try {
+            DocumentsContract.isTreeUri(first) ||
+                contentResolver.getType(first) == DocumentsContract.Document.MIME_TYPE_DIR
+        } catch (e: Exception) {
+            false
+        }
+        val resolved = merged.take(4).map {
+            try { contentResolver.getType(it) } catch (e: Exception) { null }
+        }
+        val mime = ShareIntentRules.pickMime(intent.type, resolved)
+        val kind = ShareIntentRules.kindFor(mime, isDirectory)
+        if (kind == null) {
+            // A MIME-only router drops shares from providers that answer nothing useful
+            // (application/octet-stream or */* for every item). Those are worth opening by
+            // sniffing the bytes; a genuinely unsupported type (PDF, text) is not.
+            val opaque = mime == null || mime == "*/*" ||
+                mime == "application/octet-stream" || mime.startsWith("application/")
+            if (!opaque) {
+                Log.w("TimeLapse", "Unsupported share: action=$action type=${intent.type} mime=$mime")
+                return null
+            }
+            Log.i("TimeLapse", "Share intake: opaque mime=$mime count=${merged.size} — sniffing bytes")
+            return SharePayload(null, merged, mime)
+        }
+        Log.i("TimeLapse", "Share intake: kind=$kind count=${merged.size} mime=$mime")
+        return SharePayload(kind, merged, mime)
+    }
+
+    private fun loadSharedPayload(payload: SharePayload) {
+        if (model.isProcessing.value == true) {
+            showToast("Finish or cancel the current render before sharing new media")
+            return
+        }
+        when (payload.kind) {
+            ShareIntentRules.Kind.VIDEO -> {
+                if (payload.uris.size > 1) {
+                    // The sheet can hand over several videos; this app opens one at a time.
+                    showToast("TimeLapse opens one video at a time — loading the first")
+                }
+                loadSharedVideo(payload.uris.first())
+            }
+            ShareIntentRules.Kind.IMAGES -> loadSharedImages(payload.uris)
+            ShareIntentRules.Kind.FOLDER -> onFolderSelected(payload.uris.first())
+            null -> loadSharedBySniffing(payload.uris)
+        }
+    }
+
+    /**
+     * The sender declared no usable MIME. Read 16 bytes of the first item and route by
+     * content, which is the difference between "appears in the share sheet and does nothing"
+     * and a working share for opaque cloud providers.
+     */
+    private fun loadSharedBySniffing(uris: List<Uri>) {
+        showLoadingDialog("Opening shared file...")
+        loadingJob = lifecycleScope.launch {
+            val kind = withContext(Dispatchers.IO) {
+                try {
+                    shareMaterializer.probeKind(uris.first())
+                } catch (e: Exception) {
+                    Log.w("TimeLapse", "Sniffing shared item failed", e)
+                    null
+                }
+            }
+            dismissLoadingDialog()
+            if (model.isProcessing.value == true) {
+                showToast("Finish or cancel the current render before sharing new media")
+                return@launch
+            }
+            when (kind) {
+                com.dan.timelapse.utils.MediaSniffer.Kind.IMAGE -> loadSharedImages(uris)
+                com.dan.timelapse.utils.MediaSniffer.Kind.VIDEO -> loadSharedVideo(uris.first())
+                null -> {
+                    Log.w("TimeLapse", "Shared item is not a recognised image or video")
+                    showToast("TimeLapse can't open this file type")
+                }
+            }
+        }
+    }
+
+    /**
+     * Copy every shared image into the cache first, then load from those files. That is one
+     * fetch per cloud-only photo instead of one per probe/decode, and a grant expiring
+     * mid-render can no longer break anything.
+     */
+    private fun loadSharedImages(uris: List<Uri>) {
+        val label = if (uris.size == 1) "image" else "images"
+        showLoadingDialog("Loading ${uris.size} shared $label...")
+        loadingJob = lifecycleScope.launch {
+            try {
+                var skipped = 0
+                val input = withContext(Dispatchers.IO) {
+                    val dir = shareMaterializer.newSessionDir()
+                    val files = ArrayList<UriFile>(uris.size)
+                    uris.forEachIndexed { index, uri ->
+                        runOnUiThread {
+                            updateLoadingDialog(
+                                index, uris.size,
+                                "Copying shared $label (${index + 1}/${uris.size})..."
+                            )
+                        }
+                        // One unreadable item must not throw away the other nine. A cloud
+                        // gallery can hand over a photo whose download fails while the rest
+                        // are fine; skip it and say so.
+                        try {
+                            files.add(shareMaterializer.materializeImage(uri, dir, index))
+                        } catch (e: Exception) {
+                            skipped++
+                            Log.w("TimeLapse", "Skipping unreadable shared item ${index + 1}", e)
+                        }
+                    }
+                    if (files.isEmpty()) {
+                        throw java.io.IOException("None of the ${uris.size} shared items could be read")
+                    }
+                    ImagesFramesInput(files, model)
+                }
+                activeMediaPlayer = null
+                isSharedMediaSession = true
+                model.setFramesInput(input)
+                model.setLastSourceType(MainViewModel.SourceType.IMAGES)
+                binding.videoView.isVisible = false
+                binding.mainVideoView.isVisible = true
+                binding.videoSeekBar.max = (input.size - 1).coerceAtLeast(0)
+                if (!isTrayVisible) binding.videoSeekBar.visibility = View.VISIBLE
+                startPreviewLoop(10)
+                if (skipped == 0) {
+                    showToast("Loaded ${input.size} shared $label")
+                } else {
+                    showToast(
+                        "Loaded ${input.size} of ${input.size + skipped} shared $label " +
+                            "($skipped couldn't be read)"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("TimeLapse", "Shared image load failed", e)
+                isSharedMediaSession = false
+                showToast("Couldn't load the shared $label")
+            } finally {
+                dismissLoadingDialog()
+            }
+        }
+    }
+
+    private fun loadSharedVideo(uri: Uri) {
+        showLoadingDialog("Loading shared video...")
+        loadingJob = lifecycleScope.launch {
+            try {
+                val input = withContext(Dispatchers.IO) {
+                    VideoFramesInput(shareMaterializer.uriFileFor(uri, 0, "mp4"))
+                }
+                if (input.size <= 0) throw IllegalStateException("Shared video has no frames")
+                activeMediaPlayer = null
+                isSharedMediaSession = true
+                model.setFramesInput(input)
+                model.setLastSourceType(MainViewModel.SourceType.VIDEO)
+                binding.videoView.isVisible = true
+                binding.mainVideoView.isVisible = false
+                applyVideoRotation(model.rotation.value ?: 0)
+                applyVideoAspectRatio(model.transformState.value?.getAspectRatio())
+                binding.videoView.setVideoURI(input.videoUri)
+                binding.videoView.setOnPreparedListener { mp ->
+                    mp.isLooping = true
+                    binding.videoView.start()
+                    activeMediaPlayer = mp
+                    if (model.preserveAudio.value != true) mp.setVolume(0f, 0f)
+                    val actualDuration = mp.duration
+                    if (actualDuration > 0) binding.videoSeekBar.max = actualDuration
+                    videoDuration = actualDuration.toLong()
+                    binding.videoSeekBar.progress = 0
+                    if (!isTrayVisible) binding.videoSeekBar.visibility = View.VISIBLE
+                    startPreviewLoop(10)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e("TimeLapse", "Shared video load failed", e)
+                isSharedMediaSession = false
+                showToast("Couldn't load the shared video")
+            } finally {
+                dismissLoadingDialog()
+            }
+        }
+    }
+
     private fun onFolderSelected(uri: Uri) {
+        isSharedMediaSession = false
         persistUriPermission(uri)
         model.setLastSourceType(MainViewModel.SourceType.FOLDER)
         
@@ -2305,7 +2730,11 @@ binding.videoView.setOnPreparedListener { mp ->
                         }
                     }
                 }
+                activeMediaPlayer = null
                 model.setFramesInput(input)
+                // Folder loads never persisted a session at all, so a folder selection was
+                // lost on every restart.
+                model.saveSession(this@MainActivity)
                 binding.videoView.isVisible = false
                 binding.mainVideoView.isVisible = true
                 binding.videoSeekBar.max = input.size - 1
@@ -2327,6 +2756,12 @@ binding.videoView.setOnPreparedListener { mp ->
     }
     
     private fun showLoadingDialog(title: String) {
+        // A previous job that never got dismissed must not leak into this one.
+        loadingEtaJob?.abandon()
+        loadingEtaJob = null
+        loadingEtaPhase = null
+        loadingEtaLastFraction = 0.0
+
         val dialogView = layoutInflater.inflate(R.layout.dialog_generate, null)
         dialogView.findViewById<TextView>(R.id.dialogTitle).text = title
         dialogView.findViewById<TextView>(R.id.progressText).text = "Please wait..."
@@ -2346,8 +2781,50 @@ binding.videoView.setOnPreparedListener { mp ->
     }
     
     private fun updateLoadingDialog(current: Int, total: Int, status: String) {
+        // Several distinct passes report into the same dialog (list/filter a
+        // folder, copy shared files, probe image resolutions). They have very
+        // different per-item costs, so the phase is chosen from the status rather
+        // than assumed. The mapping is unit-tested.
+        val phase = EtaDialogText.loadingPhaseFor(status)
+
+        if (total > 0) {
+            var job = loadingEtaJob
+            if (job == null) {
+                job = try {
+                    Eta.startJob(
+                        this,
+                        EtaSpecs.loadMedia(
+                            signature = EtaApp.loadSignature(this, total),
+                            items = total,
+                            temperatureC = EtaApp.batteryTemperatureC(this),
+                            phase = phase
+                        )
+                    )
+                } catch (e: Exception) {
+                    null
+                }
+                loadingEtaJob = job
+                loadingEtaPhase = phase
+                job?.beginPhase(phase, total.toDouble())
+            } else if (loadingEtaPhase != phase) {
+                job.beginPhase(phase, total.toDouble())
+                loadingEtaPhase = phase
+            }
+            job?.progress(current.toDouble())
+            loadingEtaLastFraction = if (total > 0) current.toDouble() / total else 0.0
+        }
+
         loadingDialog?.let { dialog ->
-            dialog.findViewById<TextView>(R.id.progressText)?.text = status
+            val dialogText = com.dan.timelapse.eta.EtaDialogText.statusWithEta(
+                status, loadingEtaJob?.remainingMs() ?: -1L
+            )
+            dialog.findViewById<TextView>(R.id.progressText)?.text = dialogText
+            // Same rationale as the generate dialog's title log: the only way to
+            // verify from a device that the estimate reached the user.
+            if (dialogText != lastLoadingDialogLog) {
+                lastLoadingDialogLog = dialogText
+                Log.d("EtaEngine", "loading dialog: $dialogText")
+            }
             if (total > 0) {
                 val progressBar = dialog.findViewById<com.google.android.material.progressindicator.LinearProgressIndicator>(R.id.progressBar)
                 progressBar?.isIndeterminate = false
@@ -2357,6 +2834,19 @@ binding.videoView.setOnPreparedListener { mp ->
     }
     
     private fun dismissLoadingDialog() {
+        loadingEtaJob?.let { job ->
+            // A load cancelled halfway must not teach a rate for the items it
+            // never reached: duration / full unit count would look slow forever.
+            if (loadingEtaLastFraction >= 0.8) {
+                job.finish(true)
+                Log.i("EtaEngine", "load done: ${job.summaryLine()}")
+            } else {
+                job.abandon()
+            }
+        }
+        loadingEtaJob = null
+        loadingEtaPhase = null
+        loadingEtaLastFraction = 0.0
         loadingDialog?.dismiss()
         loadingDialog = null
     }
@@ -2370,13 +2860,51 @@ binding.videoView.setOnPreparedListener { mp ->
     }
 
     private fun clearSavedSession() {
-        val prefs = getSharedPreferences("TimeLapsePrefs", Context.MODE_PRIVATE)
-        prefs.edit().clear().commit()
+        // Remove ONLY the session. This used to be prefs.edit().clear(), which also
+        // destroyed the per-URI trim memory whenever a saved session could not be
+        // validated (e.g. every folder session before the tree-URI fix).
+        model.clearPersistedSession(this)
         model.resetProcessingState()
         if (Looper.myLooper() == Looper.getMainLooper()) {
             binding.videoView.isVisible = false
             binding.mainVideoView.isVisible = false
         }
+    }
+
+    /**
+     * Single tap on the media surface.
+     *
+     * Deliberate matrix (the container consumes every touch, so this is the only tap owner):
+     *  - a render is running           -> do nothing (never stack a decoder on top of it)
+     *  - mask canvas / frame picker    -> do nothing (those screens own their gestures)
+     *  - nothing loaded, tray hidden   -> open the Media sheet (offers video + image sequence)
+     *  - nothing loaded, Media showing -> run its primary action (the file picker), so a tap
+     *                                     never feels dead
+     *  - sheet is open                 -> dismiss it, like any bottom sheet
+     *  - otherwise                     -> play / pause
+     */
+    private fun onVideoSurfaceTapped() {
+        if (model.isProcessing.value == true) return
+        if (isMaskEditMode || isFrameSelectionMode) return
+
+        if (model.framesInput.value == null) {
+            val sourceSheetShowing =
+                isTrayVisible && binding.bottomNavigation.selectedItemId == R.id.nav_source
+            if (sourceSheetShowing) {
+                model.setLastSourceType(MainViewModel.SourceType.VIDEO)
+                openPicker()
+            } else {
+                showSourceTray()
+            }
+            return
+        }
+
+        if (isTrayVisible) {
+            hideTray()
+            return
+        }
+
+        togglePlayback()
     }
 
     private fun togglePlayback() {
@@ -2466,7 +2994,7 @@ binding.videoView.setOnPreparedListener { mp ->
         model.isPlaying.postValue(true)
 
         if (!isPlayingOriginalVideo) {
-            binding.videoView.start()
+            try { binding.videoView.start() } catch (e: Exception) { }
             return
         }
 
@@ -2474,7 +3002,10 @@ binding.videoView.setOnPreparedListener { mp ->
             val trimRange = model.trimRange.value ?: Pair(1f, input.size.toFloat())
             val startFrame = (trimRange.first - 1).toInt().coerceIn(0, input.size - 1)
             val startMs = (startFrame * 1000 / input.fps).toLong()
-            
+
+            previewLoopTarget = loopCount
+            previewLoopsDone = 0
+
             var currentLoop = 0
             binding.videoView.setOnCompletionListener { 
                 if (model.processedImageUri.value != null) return@setOnCompletionListener
@@ -2494,12 +3025,22 @@ binding.videoView.setOnPreparedListener { mp ->
             }
             if (model.processedImageUri.value == null) {
                 lastWatchdogSeekTime = System.currentTimeMillis()
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    activeMediaPlayer?.seekTo(startMs, MediaPlayer.SEEK_CLOSEST)
-                } else {
-                    binding.videoView.seekTo(startMs.toInt())
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        activeMediaPlayer?.seekTo(startMs, MediaPlayer.SEEK_CLOSEST)
+                    } else {
+                        binding.videoView.seekTo(startMs.toInt())
+                    }
+                } catch (e: IllegalStateException) {
+                    Log.w("MainActivity", "Ignored seekTo in startPreviewLoop: MediaPlayer not ready", e)
+                } catch (e: Exception) {
+                    Log.w("MainActivity", "Seek error in startPreviewLoop", e)
                 }
-                binding.videoView.start()
+                try {
+                    binding.videoView.start()
+                } catch (e: Exception) {
+                    Log.w("MainActivity", "Ignored start in startPreviewLoop", e)
+                }
                 trimWatchdogHandler.post(trimWatchdogRunnable)
             }
         } else if (input is ImagesFramesInput) {
@@ -2544,6 +3085,34 @@ binding.videoView.setOnPreparedListener { mp ->
         }
     }
 
+    private fun handlePreviewLoopEnd(startMs: Long): Boolean {
+        previewLoopsDone++
+        val finiteTarget = previewLoopTarget > 0 && previewLoopTarget != Int.MAX_VALUE
+        if (finiteTarget && previewLoopsDone >= previewLoopTarget) {
+            try { binding.videoView.pause() } catch (e: Exception) { }
+            model.isPlaying.postValue(false)
+            trimWatchdogHandler.removeCallbacks(trimWatchdogRunnable)
+            return true
+        }
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                activeMediaPlayer?.seekTo(startMs.toLong(), MediaPlayer.SEEK_CLOSEST)
+            } else {
+                binding.videoView.seekTo(startMs.toInt())
+            }
+        } catch (e: IllegalStateException) {
+            Log.w("MainActivity", "Ignored seekTo in watchdog", e)
+        } catch (e: Exception) {
+            Log.w("MainActivity", "Seek error in watchdog", e)
+        }
+        try {
+            binding.videoView.start()
+        } catch (e: Exception) {
+            // Swallow state desyncs
+        }
+        return false
+    }
+
     fun stopPreviewLoop() {
         playbackJob?.cancel()
         trimWatchdogHandler.removeCallbacks(trimWatchdogRunnable)
@@ -2557,6 +3126,35 @@ binding.videoView.setOnPreparedListener { mp ->
         binding.videoView.setOnCompletionListener(null)
     }
 
+    /**
+     * Cancels the preview loop and then WAITS for its body to actually finish.
+     *
+     * `Job.cancel()` is cooperative: the loop only observes it at a suspension point, so a
+     * coroutine that is already inside `ImagesFramesInput.getFrame()` — a blocking native
+     * decode of a 16-bit TIFF/PNG — keeps running after `stopPreviewLoop()` returns. The
+     * render used to start in exactly that window, leaving two threads decoding the same
+     * sequence through OpenCV at once. That is the environment in which `cvtColor` once
+     * reported a heap pointer (`0x5FD2xxxx`) as its output channel count.
+     *
+     * MUST be called from a background dispatcher: the loop's last statement is a
+     * `withContext(Dispatchers.Main)`, so joining while holding Main would deadlock.
+     */
+    suspend fun stopPreviewLoopAndJoin() {
+        val job = playbackJob
+        withContext(Dispatchers.Main) { stopPreviewLoop() }
+        if (job != null && !job.isCompleted) {
+            // A decode of a large frame can legitimately take a while; do not wait forever.
+            val joined = kotlinx.coroutines.withTimeoutOrNull(PREVIEW_JOIN_TIMEOUT_MS) { job.join() }
+            if (joined == null) {
+                Log.w("TimeLapse", "Preview loop still running after ${PREVIEW_JOIN_TIMEOUT_MS}ms; " +
+                        "starting the render anyway")
+            } else {
+                Log.d("TimeLapse", "Preview loop joined before render")
+            }
+        }
+        playbackJob = null
+    }
+
     fun seekVideoTo(positionMs: Int) {
         if (model.processedImageUri.value != null) return
         safeSeekTo(positionMs)
@@ -2568,57 +3166,67 @@ binding.videoView.setOnPreparedListener { mp ->
         binding.bottomNavigation.isVisible = false
         hideTray()
         stopPreviewLoop()
-        
-        // Task 1: Show video player, hide TouchImageView for frame selection
-        binding.mainVideoView.isVisible = false
-        binding.videoView.isVisible = true
-        
+
         val processedUri = model.processedVideoUri.value
         val input = model.framesInput.value
-        
-        // Force slider to use original video frame count - protect against any state corruption
-        if (input != null) {
+        val isImageInput = input is com.dan.timelapse.framesinput.ImagesFramesInput
+        val usesRenderedTimeline = processedUri != null && !isImageInput
+
+        // Image sequences are previewed on the image view; videos use the player.
+        binding.mainVideoView.isVisible = isImageInput
+        binding.videoView.isVisible = !isImageInput
+
+        // Frame-index mode (images and videos with no rendered preview).
+        if (input != null && !usesRenderedTimeline) {
             binding.fullScreenFrameSlider.valueFrom = 0f
             val maxValue = (input.size - 1).toFloat().coerceAtLeast(1f)
             binding.fullScreenFrameSlider.valueTo = maxValue
             binding.fullScreenFrameSlider.stepSize = 1.0f  // Force integer frame indices
-            
+
             // Force slider to refresh its internal state
             binding.fullScreenFrameSlider.isEnabled = false
             binding.fullScreenFrameSlider.isEnabled = true
-            
-            val savedPosition = model.selectedFramePositionMs.value?.toFloat() ?: maxValue
+
+            val savedIndex = model.selectedFramePositionMs.value?.toInt()
+            val savedPosition = savedIndex?.toFloat() ?: maxValue
             binding.fullScreenFrameSlider.value = savedPosition.coerceIn(0f, maxValue)
             updateFramePreview(savedPosition.toInt())
             updateFrameInfoText(savedPosition.toLong())
         }
-        
-        if (processedUri != null) {
-            binding.videoView.isVisible = true
-            binding.mainVideoView.isVisible = false  // Task 1: Unblock video player
-        }
-        
-        // Task 1: Ensure TouchImageView is hidden when showing video for frame selection
-        if (model.processedImageUri.value == null) {
-            binding.mainVideoView.isVisible = false
-        }
-        
-        // Only set up slider in video time mode for actual video inputs, not image sequences
-        // Image sequences always use frame index mode regardless of processedVideoUri
-        if (processedUri != null && input !is com.dan.timelapse.framesinput.ImagesFramesInput) {
-            val duration = try { binding.videoView.duration } catch(e: Exception) { 0 }
-            if (duration > 0) {
-                setupSliderForVideo(duration)
+
+        if (input is com.dan.timelapse.framesinput.VideoFramesInput) {
+            if (processedUri != null) {
+                // Slider is in rendered-video time mode (milliseconds).
+                val duration = try { binding.videoView.duration } catch(e: Exception) { 0 }
+                if (duration > 0) {
+                    setupSliderForVideo(duration)
+                } else {
+                    binding.videoView.setOnPreparedListener { mp ->
+                        mp.isLooping = true
+                        binding.videoView.start()
+                        activeMediaPlayer = mp
+                        setupSliderForVideo(mp.duration)
+                        binding.videoView.setOnPreparedListener(null)
+                    }
+                    applyVideoRotation(model.rotation.value ?: 0)
+                    activeMediaPlayer = null
+                    binding.videoView.setVideoURI(processedUri)
+                }
             } else {
+                // No rendered preview (e.g. after an MFSR still tore the player down).
+                // Reattach the SOURCE video so the picker can seek frame by frame.
                 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true
-                    binding.videoView.start()
                     activeMediaPlayer = mp
-                    setupSliderForVideo(mp.duration)
+                    val fps = input.fps.coerceAtLeast(1)
+                    val frameIndex = binding.fullScreenFrameSlider.value.toLong()
+                    mp.seekTo((frameIndex * 1000L / fps).toInt())
+                    mp.pause()
                     binding.videoView.setOnPreparedListener(null)
                 }
                 applyVideoRotation(model.rotation.value ?: 0)
-                binding.videoView.setVideoURI(processedUri)
+                activeMediaPlayer = null
+                binding.videoView.setVideoURI(input.videoUri)
             }
         }
     }
@@ -2628,12 +3236,14 @@ binding.videoView.setOnPreparedListener { mp ->
         binding.fullScreenFrameSlider.valueFrom = 0f
         binding.fullScreenFrameSlider.valueTo = duration.toFloat()
         binding.fullScreenFrameSlider.stepSize = 1.0f  // Force integer frame indices
-        val startPosition = model.selectedFramePositionMs.value?.toFloat() ?: duration.toFloat()
-        binding.fullScreenFrameSlider.value = startPosition.coerceIn(0f, duration.toFloat())
-        // Guard: Don't seek if we're showing an image
-        if (model.processedImageUri.value == null) {
-            binding.videoView.seekTo(startPosition.toInt())
+        val savedIndex = model.selectedFramePositionMs.value?.toInt()
+        val startPosition = if (savedIndex != null) {
+            model.renderedPositionMsForSourceFrame(savedIndex).toFloat()
+        } else {
+            duration.toFloat()
         }
+        binding.fullScreenFrameSlider.value = startPosition.coerceIn(0f, duration.toFloat())
+        binding.videoView.seekTo(startPosition.toInt())
         updateFrameInfoText(startPosition.toLong())
     }
     
@@ -2645,8 +3255,12 @@ binding.videoView.setOnPreparedListener { mp ->
             // Slider is in frame index mode
             val frameIndex = positionMs.toInt()
             binding.textFrameInfo.text = "Frame ${frameIndex + 1}/$totalFrames"
+        } else if (model.processedVideoUri.value == null) {
+            // No rendered preview yet: the slider is in SOURCE frame-index mode.
+            val frameIndex = positionMs.toInt().coerceIn(0, (totalFrames - 1).coerceAtLeast(0))
+            binding.textFrameInfo.text = "Frame ${frameIndex + 1}/$totalFrames"
         } else {
-            // Slider is in video time mode (milliseconds)
+            // Slider is in rendered-video time mode (milliseconds)
             val totalDuration = try { binding.videoView.duration.toLong() } catch(e: Exception) { 1L }.coerceAtLeast(1)
             val fps = model.outputFps.value ?: 30
             val totalVideoFrames = ((totalDuration * fps) / 1000).toInt().coerceAtLeast(1)
@@ -2660,7 +3274,7 @@ binding.videoView.setOnPreparedListener { mp ->
     
     private fun confirmSelectedFrame() {
         val selectedPositionMs = binding.fullScreenFrameSlider.value.toLong()
-        model.setSelectedFramePosition(selectedPositionMs)
+        model.setSelectedFrameFromPicker(selectedPositionMs)
         isFrameSelectionMode = false
         binding.frameSelectorOverlay.isVisible = false
         binding.bottomNavigation.isVisible = true
@@ -2705,6 +3319,10 @@ binding.videoView.setOnPreparedListener { mp ->
                     binding.mainVideoView.setImageBitmap(bmp)
                 }
             } catch (e: Exception) { }
+        } else if (input is com.dan.timelapse.framesinput.VideoFramesInput) {
+            // Source frame-index mode: seek the original video to the matching time.
+            val fps = input.fps.coerceAtLeast(1)
+            safeSeekTo((frameIndex.toLong() * 1000L / fps).toInt())
         }
     }
 
@@ -2721,19 +3339,25 @@ binding.videoView.setOnPreparedListener { mp ->
     
     fun getRenderedVideoFrame(): Bitmap? {
         val videoPath = model.lastGeneratedFilePath ?: return null
+        if (!videoPath.endsWith(".mp4", ignoreCase = true)) return null
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(videoPath)
             val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLong() ?: 0
             val positionUs = when {
                 model.selectedFramePositionMs.value != null -> {
-                    val safeMs = model.selectedFramePositionMs.value!!.coerceAtMost((durationMs - 100).coerceAtLeast(0))
+                    val sourceIndex = model.selectedFramePositionMs.value!!.toInt()
+                    val renderedMs = model.renderedPositionMsForSourceFrame(sourceIndex)
+                    val safeMs = renderedMs.coerceAtMost((durationMs - 100).coerceAtLeast(0))
                     safeMs * 1000
                 }
                 binding.videoView.isPlaying -> binding.videoView.currentPosition.toLong() * 1000
                 else -> (durationMs * 1000) / 2
             }
-            retriever.getFrameAtTime(positionUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            // OPTION_CLOSEST decodes the exact requested frame. OPTION_CLOSEST_SYNC
+            // snaps to the nearest keyframe, which can be up to ~1s away in these
+            // renders and saved the wrong moment.
+            retriever.getFrameAtTime(positionUs, MediaMetadataRetriever.OPTION_CLOSEST)
         } catch (e: Exception) {
             null
         } finally {
@@ -2743,6 +3367,8 @@ binding.videoView.setOnPreparedListener { mp ->
     
     fun shareVideo() {
         val videoPath = model.lastGeneratedFilePath ?: return
+        // MFSR / still renders must never be shared as video/mp4.
+        if (!videoPath.endsWith(".mp4", ignoreCase = true)) return
         val videoFile = java.io.File(videoPath)
         if (!videoFile.exists()) return
         val uri = androidx.core.content.FileProvider.getUriForFile(this, "${packageName}.provider", videoFile)
@@ -2804,6 +3430,11 @@ binding.videoView.setOnPreparedListener { mp ->
     fun showToast(message: String) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
+
+    /** For messages the user has to read and act on (render refusals). */
+    fun showToastLong(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+    }
     
     private fun clearMfsrCache() {
         try {
@@ -2852,13 +3483,54 @@ binding.videoView.setOnPreparedListener { mp ->
     
     private fun isUriAccessible(uri: Uri): Boolean {
         return try {
-            contentResolver.persistedUriPermissions.any { it.uri == uri && it.isReadPermission }
+            val grants = contentResolver.persistedUriPermissions
+            // Video / single-document session: the exact grant is on the URI.
+            grants.any { it.uri == uri && it.isReadPermission } ||
+                // Folder session: the grant is on the tree, and the saved URI may be
+                // either that tree or a document inside it.
+                grants.any { it.isReadPermission && isUnderTreeGrant(uri, it.uri) } ||
+                // Belt and braces: the platform may still consider the grant live even
+                // if it is not listed in persistedUriPermissions (provider quirks).
+                checkUriPermission(
+                    uri,
+                    android.os.Process.myPid(),
+                    android.os.Process.myUid(),
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
         } catch (e: Exception) {
             false
         }
     }
 
+    /**
+     * True when [uri] is the tree [grant] itself or a document inside it.
+     *
+     * SAF document URIs are `/tree/<treeId>/document/<treeId>/<relative>`, so a plain
+     * path prefix test does not work: the first path segment differs. The document id
+     * (not the path) is what carries the relationship.
+     */
+    private fun isUnderTreeGrant(uri: Uri, grant: Uri): Boolean {
+        if (uri == grant) return true
+        if (uri.scheme != grant.scheme || uri.authority != grant.authority) return false
+        val grantSegments = grant.pathSegments
+        val uriSegments = uri.pathSegments
+        val treeIndex = grantSegments.indexOf("tree")
+        val docIndex = uriSegments.indexOf("document")
+        if (treeIndex < 0 || treeIndex + 1 >= grantSegments.size) return false
+        val treeId = grantSegments[treeIndex + 1]
+        val documentId = if (docIndex >= 0 && docIndex + 1 < uriSegments.size) {
+            uriSegments[docIndex + 1]
+        } else {
+            // The URI itself may be a tree URI from a different picker path.
+            val otherTree = uriSegments.indexOf("tree")
+            if (otherTree < 0 || otherTree + 1 >= uriSegments.size) return false
+            uriSegments[otherTree + 1]
+        }
+        return documentId == treeId || documentId.startsWith("$treeId/")
+    }
+
     fun onOpenLastSelection() {
+        isSharedMediaSession = false
         model.isUserPaused = false
         val (uri, _) = model.loadLastSession(this)
         if (uri != null) {
@@ -2902,6 +3574,7 @@ binding.videoView.setOnPreparedListener { mp ->
         } catch (e: CancellationException) {
             throw e
         } catch (e: FileNotFoundException) {
+            Log.e("TimeLapse", "Video session restore failed — file not found ($uri)", e)
             withContext(Dispatchers.Main + NonCancellable) {
                 clearSavedSession()
                 showToast("Selected video file not found")
@@ -2911,6 +3584,7 @@ binding.videoView.setOnPreparedListener { mp ->
             withContext(Dispatchers.Main + NonCancellable) { showToast("Storage temporarily unavailable") }
             return
         } catch (e: Exception) {
+            Log.e("TimeLapse", "Video session restore failed ($uri)", e)
             withContext(Dispatchers.Main + NonCancellable) {
                 clearSavedSession()
                 showToast("Cannot access last file (permission may have been revoked)")
@@ -2919,10 +3593,12 @@ binding.videoView.setOnPreparedListener { mp ->
         }
         withContext(Dispatchers.Main) {
             try {
+                activeMediaPlayer = null
                 model.setFramesInput(inputObj)
                 binding.videoView.isVisible = true
                 binding.mainVideoView.isVisible = false
                 applyVideoRotation(model.rotation.value ?: 0)
+                activeMediaPlayer = null
                 binding.videoView.setVideoURI(inputObj.videoUri)
                 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true
@@ -2956,30 +3632,55 @@ binding.videoView.setOnPreparedListener { mp ->
     }
     
     private suspend fun loadImagesForLastSession(uri: Uri) {
-        withContext(Dispatchers.Main) {
-            try {
-                val uriFile = UriFile.fromSingleUri(this@MainActivity, uri)
-                    ?: throw FileNotFoundException("Image URI not found: $uri")
-                val inputObj = ImagesFramesInput(listOf(uriFile), model)
-                model.setFramesInput(inputObj)
-                binding.videoView.isVisible = false
-                binding.mainVideoView.isVisible = true
-                binding.videoSeekBar.max = inputObj.size - 1
-                if (!isTrayVisible) {
-                    binding.videoSeekBar.visibility = View.VISIBLE
+        // A multi-select session stores every child URI; a single pick (or an older
+        // session) only has the one. Restoring just `uri` reopened 50 photos as 1 frame.
+        val restoreUris = model.lastMediaUris.value?.takeIf { it.isNotEmpty() } ?: listOf(uri)
+
+        val inputObj: ImagesFramesInput
+        try {
+            // UriFile.fromSingleUri runs a content query per URI and the constructor
+            // probes up to 100 frames (stream opens + bounds decodes). All of that used
+            // to run inside withContext(Main): a multi-second main-thread block, i.e. an
+            // ANR risk on a slow DocumentsProvider.
+            inputObj = withContext(Dispatchers.IO) {
+                val uriFiles = restoreUris.map { u ->
+                    UriFile.fromSingleUri(this@MainActivity, u)
+                        ?: throw FileNotFoundException("Image URI not found: $u")
                 }
-                startPreviewLoop(10)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: FileNotFoundException) {
-                clearSavedSession()
-                showToast("Image file not found")
-            } catch (e: IOException) {
-                showToast("Storage temporarily unavailable")
-            } catch (e: Exception) {
-                clearSavedSession()
-                showToast("Failed to restore image session")
+                ImagesFramesInput(uriFiles, model)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: FileNotFoundException) {
+            Log.e("TimeLapse", "Image session restore failed — file not found ($uri)", e)
+            clearSavedSession()
+            withContext(Dispatchers.Main + NonCancellable) { showToast("Image file not found") }
+            return
+        } catch (e: IOException) {
+            withContext(Dispatchers.Main + NonCancellable) {
+                showToast("Storage temporarily unavailable")
+            }
+            return
+        } catch (e: Exception) {
+            Log.e("TimeLapse", "Image session restore failed ($uri)", e)
+            clearSavedSession()
+            withContext(Dispatchers.Main + NonCancellable) { showToast("Failed to restore image session") }
+            return
+        }
+
+        withContext(Dispatchers.Main) {
+            activeMediaPlayer = null
+            model.setFramesInput(inputObj)
+            binding.videoView.isVisible = false
+            binding.mainVideoView.isVisible = true
+            binding.videoSeekBar.max = inputObj.size - 1
+            if (!isTrayVisible) {
+                binding.videoSeekBar.visibility = View.VISIBLE
+            }
+            if (restoreUris.size > 1) {
+                showToast("Restored ${inputObj.size} images")
+            }
+            startPreviewLoop(10)
         }
     }
     
@@ -2999,29 +3700,40 @@ binding.videoView.setOnPreparedListener { mp ->
                     dismissLoadingDialog()
                 }
                 
-                model.setFramesInput(inputObj)
-                binding.videoView.isVisible = false
-                binding.mainVideoView.isVisible = true
-                binding.videoSeekBar.max = inputObj.size - 1
-                if (!isTrayVisible) {
-                    binding.videoSeekBar.visibility = View.VISIBLE
+                // Everything below touches LiveData and Views: it MUST run on the main
+                // thread. Running it on Dispatchers.IO threw
+                // "Cannot invoke setValue on a background thread", which dropped into
+                // the catch below, cleared the session and made folder restore
+                // impossible (the restore always "failed").
+                withContext(Dispatchers.Main) {
+                    activeMediaPlayer = null
+                    model.setFramesInput(inputObj)
+                    binding.videoView.isVisible = false
+                    binding.mainVideoView.isVisible = true
+                    binding.videoSeekBar.max = inputObj.size - 1
+                    if (!isTrayVisible) {
+                        binding.videoSeekBar.visibility = View.VISIBLE
+                    }
+                    showToast("Restored: ${inputObj.name}")
+                    startPreviewLoop(10)
                 }
-                withContext(Dispatchers.Main) { showToast("Restored: ${inputObj.name}") }
-                startPreviewLoop(10)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: FileNotFoundException) {
+                Log.e("TimeLapse", "Folder session restore: folder missing ($uri)", e)
                 withContext(Dispatchers.Main + NonCancellable) {
                     dismissLoadingDialog()
                     clearSavedSession()
                     showToast("Folder not found — session cleared")
                 }
             } catch (e: IOException) {
+                Log.w("TimeLapse", "Folder session restore: storage unavailable ($uri)", e)
                 withContext(Dispatchers.Main + NonCancellable) {
                     dismissLoadingDialog()
                     showToast("Storage temporarily unavailable")
                 }
             } catch (e: Exception) {
+                Log.e("TimeLapse", "Folder session restore failed ($uri)", e)
                 withContext(Dispatchers.Main + NonCancellable) {
                     dismissLoadingDialog()
                     clearSavedSession()
@@ -3052,17 +3764,26 @@ binding.videoView.setOnPreparedListener { mp ->
                 .commitNow()
         }
         binding.maskOverlay.visibility = View.VISIBLE
+        // The dimmer is force-hidden in mask mode (see updateDimmer); call it here so
+        // the scrim does not linger over the canvas after the tray opened it.
+        updateDimmer()
         showTray()
     }
     
     fun closeMaskEditor() {
+        restoreMediaSurfaceAfterMaskEditor()
         isMaskEditMode = false
         binding.bottomNavigation.visibility = View.VISIBLE
         binding.maskOverlay.visibility = View.GONE
         showSourceTray()
+        // showTray() returns early when the tray is already visible (it is: the mask
+        // editor opened it), so nothing would re-show the scrim. Without this the tray
+        // stayed open over un-dimmed media until it was closed and reopened.
+        updateDimmer()
     }
     
     fun closeMaskEditorToTransform() {
+        restoreMediaSurfaceAfterMaskEditor()
         isMaskEditMode = false
         binding.bottomNavigation.visibility = View.VISIBLE
         binding.maskOverlay.visibility = View.GONE
@@ -3071,6 +3792,20 @@ binding.videoView.setOnPreparedListener { mp ->
             .commitNow()
         binding.bottomNavigation.selectedItemId = R.id.nav_transform
         showTray()
+        updateDimmer()
+    }
+
+    /**
+     * MaskEditFragment disables zoom in DRAW/ERASE mode and replaces the zoom listener with its
+     * own. Without this, zoom, pan and tap-to-play stay dead for the rest of the session after
+     * the editor is closed.
+     */
+    private fun restoreMediaSurfaceAfterMaskEditor() {
+        binding.videoContainer.isZoomEnabled = true
+        binding.videoContainer.onZoomListener = videoZoomListener
+        // The zoom was a drawing aid: return to a predictable fit-to-screen preview.
+        binding.videoContainer.restoreZoom(1f, 0f, 0f)
+        model.setZoom(1f, 0f, 0f)
     }
     
     private fun showGenerateDialog() {
@@ -3160,6 +3895,7 @@ binding.videoView.setOnPreparedListener { mp ->
             isPlayingOriginalVideo = false
             binding.videoView.isVisible = true
             binding.mainVideoView.isVisible = false
+            activeMediaPlayer = null
             binding.videoView.setVideoURI(processedVideoUri)
             binding.videoView.setOnPreparedListener { mp ->
                 mp.isLooping = true
@@ -3202,6 +3938,7 @@ binding.videoView.setOnPreparedListener { mp ->
             binding.mainVideoView.isVisible = false
             
             if (input is VideoFramesInput) {
+                activeMediaPlayer = null
                 binding.videoView.setVideoURI(input.videoUri)
                 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true
@@ -3218,7 +3955,7 @@ binding.videoView.setOnPreparedListener { mp ->
                 }
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
                         try {
-                            val targetFps = model.outputFps.value ?: model.previewFps.value ?: 30
+                            val targetFps = model.previewFps.value ?: model.outputFps.value ?: 30
                             val baseFps = input.fps.coerceAtLeast(1)
                             val speedFactor = targetFps.toFloat() / baseFps.toFloat()
                             val wasPlaying = mp.isPlaying
@@ -3254,6 +3991,7 @@ binding.videoView.setOnPreparedListener { mp ->
         binding.mainVideoView.isVisible = false
         
         if (input is VideoFramesInput) {
+            activeMediaPlayer = null
             binding.videoView.setVideoURI(input.videoUri)
             binding.videoView.setOnPreparedListener { mp ->
                 mp.isLooping = true
@@ -3276,6 +4014,7 @@ binding.videoView.setOnPreparedListener { mp ->
         val processedUri = _comparisonOriginalUri ?: model.processedVideoUri.value ?: return
         
         isPlayingOriginalVideo = false
+        activeMediaPlayer = null
         binding.videoView.setVideoURI(processedUri)
         binding.videoView.setOnPreparedListener { mp ->
             mp.isLooping = true
@@ -3410,6 +4149,7 @@ binding.videoView.setOnPreparedListener { mp ->
             binding.videoView.setOnErrorListener(null)
             
             if (!isEditingTab && processedUri != null) {
+                activeMediaPlayer = null
                 binding.videoView.setVideoURI(processedUri)
                 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true
@@ -3421,6 +4161,7 @@ binding.videoView.setOnPreparedListener { mp ->
                     if (model.isPlaying.value == true) mp.start() else mp.pause()
                 }
             } else if (input is VideoFramesInput) {
+                activeMediaPlayer = null
                 binding.videoView.setVideoURI(input.videoUri)
                 binding.videoView.setOnPreparedListener { mp ->
                     mp.isLooping = true

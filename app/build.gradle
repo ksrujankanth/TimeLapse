@@ -6,7 +6,7 @@ plugins {
     id 'org.jetbrains.kotlin.plugin.serialization' version '1.9.23'
 }
 
-def keystorePropertiesFile = file("C:/code/android/keystore.properties")
+def keystorePropertiesFile = rootProject.file("keystore.properties")
 def keystoreProperties = new Properties()
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
@@ -15,14 +15,14 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace 'com.dan.timelapse'
     compileSdk 34
-    ndkVersion "26.1.10909125"
+    ndkVersion "27.1.12297006"
 
     defaultConfig {
         applicationId "com.dan.timelapse"
         minSdk 29
         targetSdk 34
-        versionCode 30
-        versionName "3.0"
+        versionCode 31
+        versionName "3.0.1"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
@@ -40,7 +40,10 @@ android {
 
     packagingOptions {
         jniLibs {
-            useLegacyPackaging = true // Forces extraction of .so files
+            // 16 KB page-size support (Android 15+). Must be false: legacy packaging
+            // compresses the .so files and forces extraction, which defeats the
+            // 16 KB zip alignment Android requires.
+            useLegacyPackaging = false
         }
     }
 

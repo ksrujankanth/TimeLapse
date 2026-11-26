@@ -18,6 +18,7 @@ class OutputParams {
         const val KEY_STABILIZATION = "STABILIZATION"
         const val KEY_ALIGN_TO_FIRST = "ALIGN-TO-FIRST"
         const val KEY_STABILIZATION_ZOOM = "STABILIZATION-ZOOM"
+        const val KEY_STABILIZATION_SMOOTHING = "STABILIZATION-SMOOTHING"
         const val KEY_MASK_HASH = "MASK-HASH"
         const val KEY_EFFECT = "EFFECT"
         const val KEY_EFFECT_SIZE = "EFFECT-SIZE"
@@ -25,6 +26,8 @@ class OutputParams {
         const val KEY_TRIM_END = "TRIM-END"
         const val KEY_WIDTH = "WIDTH"
         const val KEY_HEIGHT = "HEIGHT"
+        const val KEY_FILE_QUALITY = "FILE-QUALITY"
+        const val KEY_PRESERVE_AUDIO = "PRESERVE-AUDIO"
 
         private fun compare(a: Map<String, Int>, b: Map<String, Int>): Int {
             var fpsChanged = false

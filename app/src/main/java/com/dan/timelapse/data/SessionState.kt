@@ -5,6 +5,12 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class SessionState(
     val lastMediaUri: String?,
+    /**
+     * Every selected image of a multi-select sequence. `lastMediaUri` can only hold
+     * one, so without this a 50-photo selection reopened as one frame.
+     * Empty for folders (the tree URI is re-listed) and for single picks.
+     */
+    val lastMediaUris: List<String> = emptyList(),
     val lastEffect: Int,
     val lastSampling: Int,
     val lastRotation: Int,
@@ -26,5 +32,8 @@ data class SessionState(
     val panX: Float,
     val panY: Float,
     val trimStartFrameIndex: Float = 0f,  // For image sequence frame indices
-    val trimEndFrameIndex: Float = 0f     // For image sequence frame indices
+    val trimEndFrameIndex: Float = 0f,    // For image sequence frame indices
+    val outputFps: Int = 30,
+    val fileQuality: Int = 50,
+    val fullResExport: Boolean = false
 )

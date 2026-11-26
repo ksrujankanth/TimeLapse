@@ -235,12 +235,22 @@ binding.btnMaskDone.setOnClickListener {
             
             // Set initial toggle states
             popup.menu.findItem(R.id.menu_auto_play)?.isChecked = isAutoPlayEnabled
-            popup.menu.findItem(R.id.menu_auto_stabilize)?.isChecked = 
+            popup.menu.findItem(R.id.menu_auto_stabilize)?.isChecked =
                 model.autoStabilizeWithMask.value ?: true
-            popup.menu.findItem(R.id.menu_zoom_stabilized)?.isChecked = 
-                (model.stabilizationZoom.value ?: 1.0f) > 1.0f
-            popup.menu.findItem(R.id.menu_align_to_first)?.isChecked = 
-                model.alignToFirstFrame.value ?: true
+
+            val alignToFirst = model.alignToFirstFrame.value ?: true
+            popup.menu.findItem(R.id.menu_mode_lock)?.isChecked = alignToFirst
+            popup.menu.findItem(R.id.menu_mode_smooth)?.isChecked = !alignToFirst
+
+            val smoothing = model.stabilizationSmoothing.value ?: 60
+            popup.menu.findItem(R.id.menu_smooth_light)?.isChecked = smoothing <= 35
+            popup.menu.findItem(R.id.menu_smooth_medium)?.isChecked = smoothing in 36..90
+            popup.menu.findItem(R.id.menu_smooth_strong)?.isChecked = smoothing > 90
+
+            val cropPercent = (((model.stabilizationZoom.value ?: 1.05f) - 1.0f) * 100).toInt()
+            popup.menu.findItem(R.id.menu_crop_none)?.isChecked = cropPercent < 1
+            popup.menu.findItem(R.id.menu_crop_5)?.isChecked = cropPercent in 1..7
+            popup.menu.findItem(R.id.menu_crop_10)?.isChecked = cropPercent >= 8
 
             popup.setOnMenuItemClickListener { item ->
                 when (item.itemId) {
@@ -259,15 +269,36 @@ binding.btnMaskDone.setOnClickListener {
                         model.autoStabilizeWithMask.value = item.isChecked
                         true
                     }
-                    R.id.menu_zoom_stabilized -> {
-                        item.isChecked = !item.isChecked
-                        model.toggleStabilizationZoom()
+                    R.id.menu_mode_lock -> {
+                        model.setAlignToFirstFrame(true)
                         true
                     }
-                    R.id.menu_align_to_first -> {
-                        item.isChecked = !item.isChecked
-                        model.toggleAlignToFirstFrame()
-                        // No toast - button state change is confirmation
+                    R.id.menu_mode_smooth -> {
+                        model.setAlignToFirstFrame(false)
+                        true
+                    }
+                    R.id.menu_smooth_light -> {
+                        model.setStabilizationSmoothing(30)
+                        true
+                    }
+                    R.id.menu_smooth_medium -> {
+                        model.setStabilizationSmoothing(60)
+                        true
+                    }
+                    R.id.menu_smooth_strong -> {
+                        model.setStabilizationSmoothing(120)
+                        true
+                    }
+                    R.id.menu_crop_none -> {
+                        model.setStabilizationCropPercent(0)
+                        true
+                    }
+                    R.id.menu_crop_5 -> {
+                        model.setStabilizationCropPercent(5)
+                        true
+                    }
+                    R.id.menu_crop_10 -> {
+                        model.setStabilizationCropPercent(10)
                         true
                     }
                     R.id.menu_erase_mask -> {

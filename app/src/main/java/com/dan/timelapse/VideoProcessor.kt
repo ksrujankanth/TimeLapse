@@ -4,11 +4,23 @@ import android.content.Context
 import android.os.Environment
 import android.util.Log
 import com.dan.timelapse.filters.*
+import com.dan.timelapse.stabilization.Affine
+import com.dan.timelapse.stabilization.CamState
+import com.dan.timelapse.stabilization.MAX_AUTO_CROP_ZOOM
+import com.dan.timelapse.stabilization.StabilizationTracker
+import com.dan.timelapse.stabilization.appendTrackedState
+import com.dan.timelapse.stabilization.buildPlan
+import com.dan.timelapse.stabilization.toCamState
 import com.dan.timelapse.video.VideoWriter
 import com.dan.timelapse.images.ImageTools
 import com.dan.timelapse.framesinput.ImagesFramesInput
+import com.dan.timelapse.framesinput.FramesInput
+import com.dan.timelapse.framesinput.VideoFramesInput
+import com.dan.timelapse.eta.EtaJob
+import com.dan.timelapse.eta.EtaUnits
 import com.dan.timelapse.utils.HardwareUtils
 import com.dan.timelapse.utils.DeviceTier
+import com.dan.timelapse.utils.InputSpeed
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.opencv.core.*
@@ -31,13 +43,40 @@ class VideoProcessor(
     var onProgressWithETA: ((Int, Int, String, Long) -> Unit)? = null // (current, total, statusText, remainingTimeMillis)
     var onBusyStateChanged: ((Boolean) -> Unit)? = null
 
+    /**
+     * The learned-ETA job for the render currently running, if any.
+     *
+     * Created inside [startRendering] (it is the only place that knows the
+     * delivered frame count and the final output size) and deliberately NOT
+     * finished there: the caller still performs the audio mux and the gallery
+     * write, which are real phases of the same job. The caller must therefore
+     * call `finish(true)` on success or `abandon()` on cancel/failure.
+     */
+    var etaJob: EtaJob? = null
+        private set
+
+    /**
+     * Why the last [startRendering] returned false, in words the user can act on.
+     * Null when the failure has no better explanation than "Processing Failed".
+     */
+    var failureMessage: String? = null
+        private set
+
     // Single global watchdog (replaces per-frame Thread allocation to avoid pthread exhaustion)
     @Volatile private var lastFrameStartMs = 0L
     @Volatile private var lastFrameDebugInfo = ""
     @Volatile private var isRendering = false
 
-    // Dual-Mode Stabilization Cache
-    private val alignCache = AlignCache()
+    // ---------------- Stabilization (single-pass: preview, still export) ----------------
+    // The video render builds an exact plan from the same primitives instead of
+    // using this cache; see buildRenderPlan().
+    private val stabilizerTracker = StabilizationTracker()
+    private val stabilizationPath = ArrayList<CamState>()
+    private var stabilizationLastIndex = -1
+    /** True while rendering a single still from the legacy path (see renderHighResSnapshot). */
+    private var stillExportMode = false
+    private var stabilizationMaskCache: Mat? = null
+    private var stabilizationMaskSource: Long = 0L
     
     // Padding frame for short videos
     private var lastSeenFrameForPadding: Mat? = null
@@ -63,45 +102,6 @@ class VideoProcessor(
             // Some filters like VideoWriter don't have reset() - that's fine
         }
     }
-
-    /**
-     * Internal cache for stabilization data to prevent OOM and drift.
-     */
-    private class AlignCache {
-        var referenceGrayFrame = Mat()
-        var referenceFramePts = MatOfPoint2f()
-        val alignmentMatrices = mutableMapOf<Int, Mat>()
-        
-        // Per-frame raw transforms (absolute for first-frame mode, delta for sequential)
-        val rawTransforms = mutableListOf<TransformData>()
-        
-        // Absolute cumulative trajectory used for both alignment modes
-        val absoluteTrajectory = mutableListOf<TransformData>()
-        var smoothedTrajectory = mutableListOf<TransformData>()
-        
-        // Last known good transform — fallback when tracking fails (Fix 1)
-        var lastSuccessfulTransform = TransformData()
-
-        fun resetAll() {
-            referenceGrayFrame.release()
-            referenceGrayFrame = Mat()
-            referenceFramePts.release()
-            referenceFramePts = MatOfPoint2f()
-            alignmentMatrices.values.forEach { it.release() }
-            alignmentMatrices.clear()
-            rawTransforms.clear()
-            absoluteTrajectory.clear()
-            smoothedTrajectory.clear()
-            lastSuccessfulTransform = TransformData()
-        }
-    }
-    
-    private data class TransformData(
-        val dx: Double = 0.0,
-        val dy: Double = 0.0,
-        val da: Double = 0.0, // angle
-        val scale: Double = 1.0
-    )
 
     private fun applyEffects(frame: Mat): Mat {
         var processedFrame = frame.clone() // Take ownership from provider
@@ -179,381 +179,306 @@ class VideoProcessor(
         }
     }
 
+    // ==========================================================================
+    // Stabilization
+    // ==========================================================================
+
     /**
-     * Stabilization Engine: Supports both Global (First Frame) and Sequential (Previous Frame) alignment.
-     * Implements trajectory smoothing to prevent jumpy stabilization.
+     * Interactive / single-frame path (preview, still export).
+     *
+     * Frames arrive one at a time, so the smoothing is causal and the crop is a
+     * fixed conservative budget. The video render uses [buildRenderPlan] instead:
+     * it sees the whole clip, so it can smooth with zero phase and compute the
+     * exact crop. Both paths share the tracker and the geometry in
+     * stabilization/StabilizationMath.kt.
      */
     private fun applyStabilization(frame: Mat, frameIndex: Int): Mat {
-        // Guard against empty input
-        if (frame.empty()) return frame
-        
-        val isStabilized = model.isStabilized.value ?: false
-        if (!isStabilized) return frame
+        if (frame.empty() || model.isStabilized.value != true) return frame
+        // A still export is one frame: there is no path to smooth and no crop budget
+        // that can be justified. Warping it would apply the 3% preview crop and a
+        // CUBIC resample to a frame the user explicitly picked.
+        if (stillExportMode) return frame
 
-        val alignToFirst = model.alignToFirstFrame.value ?: true
-        
-        // G7-04: Adjustable smoothing strength from UI
-        val windowSize = model.stabilizationSmoothing.value?.coerceIn(5, 100) ?: 30
-        
-        // Mask safety: wrap in try-catch, fall back to empty mask on failure
-        var activeMask: Mat
-        try {
-            val originalMask = model.firstFrameMask.value
-            if (originalMask != null && !originalMask.empty()) {
-                activeMask = applyEffects(originalMask)
-            } else {
-                activeMask = Mat()
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("Stabilization", "Mask initialization failed, using empty mask", e)
-            activeMask = Mat()
-        }
+        // A backwards or repeated index means the caller restarted or scrubbed.
+        if (frameIndex <= 0 || frameIndex <= stabilizationLastIndex) resetStabilizationState()
+        stabilizationLastIndex = frameIndex
 
-        // Frame 0: Initialize reference frame and reset trajectory
-        if (frameIndex == 0) {
-            alignCache.rawTransforms.clear()
-            alignCache.smoothedTrajectory.clear()
-            alignCache.absoluteTrajectory.clear()
+        val cx = frame.cols() / 2.0
+        val cy = frame.rows() / 2.0
+        val anchor = model.alignToFirstFrame.value ?: true
+        val window = model.stabilizationSmoothing.value?.coerceIn(5, 200) ?: 60
+        val maxCrop = userCropBudget()
 
-            val gray = Mat()
-            Imgproc.cvtColor(frame, gray, Imgproc.COLOR_RGB2GRAY)
+        val estimate = stabilizerTracker.analyze(
+            frame,
+            processedMask(frame.cols(), frame.rows())
+        )
+        // A rejected-but-fitted frame still carries the bogus dx/dy/angle (only an
+        // outright tracker failure returns identity). Composing that onto the path
+        // baked a permanent offset into every later frame — holdInvalid repairs the
+        // invalid slot only, not the frames accumulated from it. appendTrackedState
+        // holds the last VALID state instead (unit-tested).
+        stabilizationPath.add(appendTrackedState(stabilizationPath, estimate.delta, estimate.valid, cx, cy))
 
-            val pts = MatOfPoint()
-            Imgproc.goodFeaturesToTrack(gray, pts, 500, 0.005, 20.0, if (activeMask.empty()) Mat() else activeMask)
+        val plan = buildPlan(
+            cumulative = stabilizationPath,
+            width = frame.cols(),
+            height = frame.rows(),
+            anchor = anchor,
+            smoothingWindow = window,
+            maxCrop = maxCrop,
+            centerX = cx,
+            centerY = cy,
+            cropOverride = if (maxCrop > 1.0000001) minOf(maxCrop, 1.03) else 1.0
+        )
+        val warp = plan.warps.lastOrNull() ?: return frame
+        return warpFrame(frame, warp)
+    }
 
-            if (!pts.empty()) {
-                val pts2f = MatOfPoint2f()
-                pts.convertTo(pts2f, CvType.CV_32FC2)
-                alignCache.referenceFramePts.release()
-                alignCache.referenceFramePts = pts2f
-                alignCache.referenceGrayFrame.release()
-                gray.copyTo(alignCache.referenceGrayFrame)
-            }
-            gray.release()
-            pts.release()
+    /**
+     * Analyze the whole clip, then return one warp per rendered frame.
+     *
+     * This is the offline path: smoothing runs over the full path (zero phase, no
+     * lag, no edge settle) and the crop is solved from the actual correction
+     * envelope, capped by the user's budget. Frames that fail the tracker are
+     * held, never extrapolated.
+     */
+    private fun buildRenderPlan(
+        input: FramesInput,
+        startFrame: Int,
+        endFrame: Int,
+        step: Int,
+        renderWidth: Int,
+        renderHeight: Int,
+        onAnalysisProgress: ((Int, Int) -> Unit)? = null
+    ): RenderStabilizationPlan? {
+        val anchor = model.alignToFirstFrame.value ?: true
+        val window = model.stabilizationSmoothing.value?.coerceIn(5, 200) ?: 60
+        val maxCrop = userCropBudget()
 
-            val identity = TransformData(0.0, 0.0, 0.0, 1.0)
-            alignCache.rawTransforms.add(identity)
-            alignCache.absoluteTrajectory.add(identity)
-            alignCache.smoothedTrajectory.add(identity)
-            alignCache.lastSuccessfulTransform = identity
+        stabilizerTracker.reset()
 
-            return fixBorder(frame)
-        }
-
-        if (alignCache.referenceFramePts.empty()) {
-            return fixBorder(frame)
-        }
-
-        if (alignCache.referenceGrayFrame.empty()) {
-            android.util.Log.w("VideoProcessor", "Reference frame missing for preview. Skipping stabilization.")
-            return fixBorder(frame)
-        }
-
-        val currentGray = Mat()
-        Imgproc.cvtColor(frame, currentGray, Imgproc.COLOR_RGB2GRAY)
-
-        val status = MatOfByte()
-        val err = MatOfFloat()
-        val nextPts = MatOfPoint2f()
-
-        // 1. ADAPTIVE RESOLUTION SCALING
-        val resFactor = frame.cols() / 1920.0
-
-        // Dynamic window size: larger for higher resolutions. Must be odd.
-        var lkWinSize = (25 * resFactor).toInt().coerceAtLeast(15)
-        if (lkWinSize % 2 == 0) lkWinSize += 1
-
-        // 2. ULTRA-PRECISE SUB-PIXEL OPTICAL FLOW
-        val criteria = TermCriteria(TermCriteria.EPS or TermCriteria.MAX_ITER, 50, 0.005)
+        val cumulativeStates = ArrayList<CamState>()
+        var processedWidth = 0
+        var analyzed = 0
+        var accepted = 0
 
         try {
-            Video.calcOpticalFlowPyrLK(
-                alignCache.referenceGrayFrame, currentGray,
-                alignCache.referenceFramePts, nextPts,
-                status, err,
-                Size(lkWinSize.toDouble(), lkWinSize.toDouble()),
-                4,
-                criteria, 0, 1e-4
+            input.forEachAnalysisFrame(startFrame, ANALYSIS_WIDTH, step = step) { index, rawFrame ->
+                if (model.isProcessingCancelled.value == true) return@forEachAnalysisFrame false
+                if (index > endFrame) return@forEachAnalysisFrame false
+                // Must match the render loop exactly: sampling is a stride relative
+                // to startFrame, not an absolute `index % step`, so the first kept
+                // frame is always startFrame and both passes see the same indices.
+                if (!InputSpeed.keeps(index - startFrame, step)) return@forEachAnalysisFrame true
+                // Analysis can run for a while; keep the hang watchdog quiet.
+                lastFrameStartMs = System.currentTimeMillis()
+
+                // applyEffects owns its result.
+                val processed = applyEffects(rawFrame)
+                // Pass 2 consumes a stabilization ordinal only for a non-empty frame
+                // (`if (!frame.empty())`). Appending a state for an empty frame here
+                // would shift every later frame onto the previous frame's warp, i.e. a
+                // permanent one-frame lag. Skip it so the two passes stay 1:1.
+                if (processed.empty()) {
+                    processed.release()
+                    return@forEachAnalysisFrame true
+                }
+                try {
+                    val estimate = stabilizerTracker.analyze(
+                        processed,
+                        processedMask(processed.cols(), processed.rows())
+                    )
+                    if (processedWidth == 0) processedWidth = processed.cols()
+                    if (processedWidth == 0) return@forEachAnalysisFrame true
+
+                    // The analysis pass may have decoded at a reduced resolution.
+                    // Lift the delta into render pixels before accumulating.
+                    val toRender = renderWidth.toDouble() / processedWidth
+                    val delta = if (kotlin.math.abs(toRender - 1.0) < 1e-9) {
+                        estimate.delta
+                    } else {
+                        Affine.fromRaw(
+                            estimate.delta.m02 * toRender,
+                            estimate.delta.m12 * toRender,
+                            estimate.delta.angle
+                        )
+                    }
+
+                    val cx = renderWidth / 2.0
+                    val cy = renderHeight / 2.0
+                    // Same rule as the causal path (see appendTrackedState): one bad fit
+                    // must not be compounded into every later frame.
+                    cumulativeStates.add(
+                        appendTrackedState(cumulativeStates, delta, estimate.valid, cx, cy)
+                    )
+                    analyzed++
+                    if (estimate.valid) accepted++
+                    onAnalysisProgress?.invoke(index, endFrame)
+                } finally {
+                    processed.release()
+                }
+                true
+            }
+
+            if (cumulativeStates.isEmpty()) return null
+
+            val plan = buildPlan(
+                cumulative = cumulativeStates,
+                width = renderWidth,
+                height = renderHeight,
+                anchor = anchor,
+                smoothingWindow = window,
+                maxCrop = maxCrop,
+                centerX = renderWidth / 2.0,
+                centerY = renderHeight / 2.0
+            )
+            Log.d(
+                "Stabilization",
+                "Plan: ${plan.warps.size} frames, crop ${"%.3f".format(plan.zoom)}, " +
+                    "accepted $accepted/$analyzed, residual ${"%.2f".format(plan.residualRmsPx)} px"
+            )
+            return RenderStabilizationPlan(
+                warps = plan.warps,
+                zoom = plan.zoom,
+                analyzedFrames = analyzed,
+                acceptedFrames = accepted,
+                residualPx = plan.residualRmsPx
             )
         } catch (e: Exception) {
-            android.util.Log.w("Stabilization", "calcOpticalFlowPyrLK failed at frame $frameIndex", e)
+            Log.e("Stabilization", "Render plan failed; falling back to pass-through", e)
+            return null
         }
+    }
 
-        val statusArr = status.toArray()
-        val prevPtsArr = alignCache.referenceFramePts.toList()
-        val nextPtsArr = nextPts.toList()
+    /** User's max-crop setting expressed as a zoom. 1.0 = never crop. */
+    private fun userCropBudget(): Double =
+        (model.stabilizationZoom.value ?: 1.05f).toDouble().coerceIn(1.0, MAX_AUTO_CROP_ZOOM)
 
-        val goodPrev = mutableListOf<Point>()
-        val goodNext = mutableListOf<Point>()
-
-        for (i in statusArr.indices) {
-            if (statusArr[i].toInt() == 1) {
-                goodPrev.add(prevPtsArr[i])
-                goodNext.add(nextPtsArr[i])
-            }
+    /**
+     * Mask in processed-frame coordinates. Rotating/cropping a full-resolution
+     * mask on every frame was one of the most expensive parts of the old loop;
+     * do it once per mask and cache the result.
+     */
+    private fun processedMask(width: Int, height: Int): Mat? {
+        val source = model.firstFrameMask.value
+        if (source == null || source.empty()) return null
+        if (stabilizationMaskSource == source.nativeObj &&
+            stabilizationMaskCache?.cols() == width &&
+            stabilizationMaskCache?.rows() == height
+        ) {
+            return stabilizationMaskCache
         }
-
-        var stabilizedFrame = frame.clone()
-
-        if (goodPrev.size >= 4) {
-            val prevMat = MatOfPoint2f(*goodPrev.toTypedArray())
-            val nextMat = MatOfPoint2f(*goodNext.toTypedArray())
-            val inliers = Mat()
-
-            // 3. ADAPTIVE RANSAC
-            val dynamicRansac = 1.5 * resFactor
-            val transformMat = try {
-                Calib3d.estimateAffinePartial2D(nextMat, prevMat, inliers, Calib3d.RANSAC, dynamicRansac)
-            } catch (e: Exception) {
-                android.util.Log.w("Stabilization", "estimateAffinePartial2D failed at frame $frameIndex", e)
-                inliers.release()
-                Mat()
-            }
-
-            if (!transformMat.empty()) {
-                val m00 = transformMat.get(0, 0)[0]
-                val m10 = transformMat.get(1, 0)[0]
-                val m01 = transformMat.get(0, 1)[0]
-                val m11 = transformMat.get(1, 1)[0]
-                val rawDx = transformMat.get(0, 2)[0]
-                val rawDy = transformMat.get(1, 2)[0]
-
-                val rawDa = kotlin.math.atan2(m10, m00)
-
-                // FIX 1: The Pivot Shift.
-                // Convert OpenCV's (0,0) origin translation to a Center-Based translation.
-                // This mathematically prevents the video from swinging out of frame when rotation is applied.
-                val cx = frame.cols() / 2.0
-                val cy = frame.rows() / 2.0
-                val centerDx = rawDx + m00 * cx + m01 * cy - cx
-                val centerDy = rawDy + m10 * cx + m11 * cy - cy
-
-                val hasMask = !activeMask.empty() && Core.countNonZero(activeMask) > 0
-
-                // FIX 2: Fully restore rotation! We no longer need to force da = 0.0
-                val safeData = TransformData(
-                    dx = centerDx,
-                    dy = centerDy,
-                    da = rawDa,
-                    scale = 1.0
-                )
-
-                // --- Outlier Rejection ---
-                val maxJump = frame.cols() * 0.1
-                val finalData = if (kotlin.math.abs(safeData.dx) > maxJump || kotlin.math.abs(safeData.dy) > maxJump) {
-                    alignCache.lastSuccessfulTransform
-                } else {
-                    safeData
-                }
-
-                alignCache.lastSuccessfulTransform = finalData
-                alignCache.rawTransforms.add(finalData)
-
-                // --- Absolute Trajectory Accumulation ---
-                val prevAbs = alignCache.absoluteTrajectory.last()
-                val absData = TransformData(
-                    dx = prevAbs.dx + finalData.dx,
-                    dy = prevAbs.dy + finalData.dy,
-                    da = normalizeAngle(prevAbs.da + finalData.da),
-                    scale = 1.0
-                )
-                alignCache.absoluteTrajectory.add(absData)
-
-                // FIX 3: Force Anchor Mode for Masks / Tripod / Short Burst.
-                // If a mask is drawn, or tripod (minimal motion), or short burst (<30 frames), force anchor.
-                val totalFrames = model.framesInput.value?.size ?: 100
-                val isShortBurst = totalFrames < 30
-                
-                // Tripod detection: if accumulated trajectory magnitude is very small
-                var isTripod = false
-                if (alignCache.absoluteTrajectory.size > 1) {
-                    val lastAbs = alignCache.absoluteTrajectory.last()
-                    val trajectoryMag = kotlin.math.hypot(lastAbs.dx, lastAbs.dy)
-                    isTripod = trajectoryMag < 5.0 // pixels of total drift
-                }
-                
-                val isAnchorMode = alignToFirst || hasMask || isTripod || isShortBurst
-
-                val correction = if (isAnchorMode) {
-                    // Anchor Mode: Pin the pixels exactly to the reference frame
-                    TransformData(dx = absData.dx, dy = absData.dy, da = absData.da, scale = 1.0)
-                } else {
-                    // Smooth Mode: Calculate moving average for handheld panning
-                    val smoothed = calculateSmoothedTrajectory(
-                        alignCache.absoluteTrajectory,
-                        alignCache.absoluteTrajectory.lastIndex,
-                        windowSize
-                    )
-                    alignCache.smoothedTrajectory.add(smoothed)
-
-                    TransformData(
-                        dx = smoothed.dx,
-                        dy = smoothed.dy,
-                        da = smoothed.da,
-                        scale = 1.0
-                    )
-                }
-
-                val maxShift = frame.cols() * 0.15
-                val clampedCorrection = TransformData(
-                    dx = correction.dx.coerceIn(-maxShift, maxShift),
-                    dy = correction.dy.coerceIn(-maxShift, maxShift),
-                    da = correction.da,
-                    scale = correction.scale
-                )
-
-                val stabilized = applyTransformWithClampedScale(frame, clampedCorrection)
-                stabilizedFrame.release()
-                stabilizedFrame = stabilized
+        return try {
+            val processed = applyEffects(source)
+            stabilizationMaskCache?.release()
+            stabilizationMaskCache = null
+            if (processed.cols() == width && processed.rows() == height) {
+                stabilizationMaskCache = processed
+                stabilizationMaskSource = source.nativeObj
+                processed
             } else {
-                alignCache.rawTransforms.add(TransformData(0.0, 0.0, 0.0, 1.0))
-                val prevAbs = alignCache.absoluteTrajectory.last()
-                alignCache.absoluteTrajectory.add(prevAbs)
-                alignCache.smoothedTrajectory.add(prevAbs)
+                processed.release()
+                stabilizationMaskSource = 0L
+                null
             }
-
-            inliers.release()
-            prevMat.release()
-            nextMat.release()
-            transformMat.release()
-        } else {
-            alignCache.rawTransforms.add(TransformData(0.0, 0.0, 0.0, 1.0))
-            val prevAbs = alignCache.absoluteTrajectory.last()
-            alignCache.absoluteTrajectory.add(prevAbs)
-            alignCache.smoothedTrajectory.add(prevAbs)
+        } catch (e: Exception) {
+            Log.w("Stabilization", "Mask preparation failed", e)
+            null
         }
-
-        currentGray.release()
-        status.release()
-        err.release()
-        nextPts.release()
-
-        // ALWAYS track against the RAW frame for the next iteration. 
-        // This prevents warping/cropping artifacts from ruining the optical flow.
-        val gray = Mat()
-        Imgproc.cvtColor(frame, gray, Imgproc.COLOR_RGB2GRAY)
-        val pts = MatOfPoint()
-        Imgproc.goodFeaturesToTrack(gray, pts, 500, 0.005, 20.0, activeMask)
-
-        if (!pts.empty()) {
-            val pts2f = MatOfPoint2f()
-            pts.convertTo(pts2f, CvType.CV_32FC2)
-            alignCache.referenceFramePts.release()
-            alignCache.referenceFramePts = pts2f
-            alignCache.referenceGrayFrame.release()
-            gray.copyTo(alignCache.referenceGrayFrame)
-        }
-        gray.release()
-        pts.release()
-        
-        // Prevent native memory leak from the mask clone
-        activeMask.release()
-
-        return fixBorder(stabilizedFrame)
     }
 
-    private fun normalizeAngle(angle: Double): Double {
-        return kotlin.math.atan2(kotlin.math.sin(angle), kotlin.math.cos(angle))
-    }
-    
     /**
-     * Calculate smoothed trajectory using Gaussian-weighted moving average.
-     * Gaussian weighting produces smoother motion than a flat average — nearby frames
-     * contribute more than far-away frames, which reduces the "sudden unlock" artifact
-     * you get when a transient jitter enters or leaves a flat-window average.
-     *
-     * This is a close approximation of L1-optimal trajectory smoothing for the translation
-     * component, without the complexity of a full LP solve.
+     * Apply a center-pivot affine. BORDER_REPLICATE guarantees the output never
+     * contains black bars; the crop normally keeps sampling inside the source.
      */
-    private fun calculateSmoothedTrajectory(transforms: List<TransformData>, currentIndex: Int, windowSize: Int): TransformData {
-        if (transforms.isEmpty()) return TransformData(0.0, 0.0, 0.0, 1.0)
+    private fun warpFrame(frame: Mat, warp: Affine): Mat {
+        // A sub-pixel warp is pure resampling loss. Locked-off shots have an
+        // identity plan, so pass the original pixels through bit-exact.
+        val identity = kotlin.math.abs(warp.m00 - 1.0) < 1e-9 &&
+            kotlin.math.abs(warp.m01) < 1e-9 &&
+            kotlin.math.abs(warp.m10) < 1e-9 &&
+            kotlin.math.abs(warp.m11 - 1.0) < 1e-9 &&
+            kotlin.math.abs(warp.m02) < 0.05 &&
+            kotlin.math.abs(warp.m12) < 0.05
+        if (identity) return frame
 
-        val start = (currentIndex - windowSize + 1).coerceAtLeast(0)
-        val end = currentIndex.coerceAtMost(transforms.lastIndex)
-
-        if (start >= end) return transforms[currentIndex]
-
-        // Gaussian sigma = windowSize / 3 (standard choice: 3σ covers the window)
-        val sigma = windowSize / 3.0
-        val twoSigmaSq = 2.0 * sigma * sigma
-
-        var sumDx = 0.0
-        var sumDy = 0.0
-        var sumDa = 0.0
-        var sumScale = 0.0
-        var sumWeight = 0.0
-
-        for (i in start..end) {
-            val t = transforms[i]
-            val distance = (i - currentIndex).toDouble()
-            val weight = kotlin.math.exp(-(distance * distance) / twoSigmaSq)
-
-            sumDx += t.dx * weight
-            sumDy += t.dy * weight
-            sumDa += t.da * weight
-            sumScale += t.scale * weight
-            sumWeight += weight
-        }
-
-        if (sumWeight < 1e-9) return transforms[currentIndex]
-
-        return TransformData(
-            sumDx / sumWeight,
-            sumDy / sumWeight,
-            sumDa / sumWeight,
-            sumScale / sumWeight
-        )
-    }
-    
-    /**
-     * Apply transform with scale definitively locked to 1.0 (no zoom breathing).
-     * The only zoom applied is userZoom from the UI slider.
-     * BORDER_CONSTANT (black) handles edge pixels from pan/crop.
-     */
-    private fun applyTransformWithClampedScale(frame: Mat, transform: TransformData): Mat {
         val m = Mat(2, 3, CvType.CV_64F)
-        val cos = kotlin.math.cos(transform.da) * transform.scale
-        val sin = kotlin.math.sin(transform.da) * transform.scale
-
-        val userZoom = (model.stabilizationZoom.value ?: 1.0f).toDouble()
-        val effectiveScale = 1.0 * userZoom
-
-        val maxShiftX = frame.width() * 0.15
-        val maxShiftY = frame.height() * 0.15
-        val clampedDx = transform.dx.coerceIn(-maxShiftX, maxShiftX)
-        val clampedDy = transform.dy.coerceIn(-maxShiftY, maxShiftY)
-
-        m.put(0, 0, cos * effectiveScale, -sin * effectiveScale, clampedDx)
-        m.put(1, 0, sin * effectiveScale, cos * effectiveScale, clampedDy)
-
-        val result = Mat()
-        Imgproc.warpAffine(frame, result, m, frame.size(), Imgproc.INTER_LANCZOS4 + Imgproc.WARP_FILL_OUTLIERS, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0))
-
-        m.release()
-        return result
+        m.put(0, 0, warp.m00, warp.m01, warp.m02)
+        m.put(1, 0, warp.m10, warp.m11, warp.m12)
+        val out = Mat()
+        try {
+            Imgproc.warpAffine(
+                frame, out, m, frame.size(),
+                Imgproc.INTER_CUBIC, Core.BORDER_REPLICATE, Scalar(0.0, 0.0, 0.0)
+            )
+        } finally {
+            m.release()
+        }
+        return out
     }
 
-    /**
-     * Border fix: the 1.15x zoom built into applyTransformWithClampedScale (Fix 3)
-     * handles black-border bleeding. This function is retained as a pass-through for
-     * frame 0 and non-stabilized paths.
-     */
-    private fun fixBorder(frame: Mat): Mat {
-        return frame
+    private fun resetStabilizationState() {
+        stabilizerTracker.reset()
+        stabilizationPath.clear()
+        stabilizationLastIndex = -1
+        stabilizationMaskCache?.release()
+        stabilizationMaskCache = null
+        stabilizationMaskSource = 0L
     }
-    
+
+    /** Precomputed warps for one render, indexed by rendered-frame ordinal. */
+    private class RenderStabilizationPlan(
+        val warps: List<Affine>,
+        val zoom: Double,
+        val analyzedFrames: Int,
+        val acceptedFrames: Int,
+        val residualPx: Double
+    ) {
+        fun warpAt(index: Int): Affine? = warps.getOrNull(index)
+    }
+
+    private companion object {
+        /** Analysis width. 3-4x cheaper than full res, no measurable accuracy loss. */
+        const val ANALYSIS_WIDTH = 960
+
+        /**
+         * Fewer output frames than this is not a video: the container reports a
+         * 0 ms duration and no player or gallery can show it.
+         */
+        const val MIN_OUTPUT_FRAMES = 2
+    }
+
+    /** Container duration in ms, or null when the file cannot be probed. */
+    private fun videoDurationMs(path: String): Long? {
+        val retriever = android.media.MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            retriever.extractMetadata(
+                android.media.MediaMetadataRetriever.METADATA_KEY_DURATION
+            )?.toLongOrNull()
+        } catch (e: Exception) {
+            Log.w("VideoProcessor", "Could not read output duration", e)
+            null
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
     fun startRendering(outputPath: String): Boolean {
-        // FIX: Acquire a Partial WakeLock so the CPU doesn't sleep when switching apps
-        val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-        val wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "TimeLapse::VideoRender")
-        wakeLock.acquire(60 * 60 * 1000L) // Max 1 hour
-        
+        failureMessage = null
         val input = model.framesInput.value ?: return false
         if (input.size == 0) {
             Log.e("VideoProcessor", "No frames to process")
             return false
         }
+
+        // FIX: Acquire a Partial WakeLock so the CPU doesn't sleep when switching apps.
+        // Acquired AFTER the early returns so it can never leak un-released.
+        val pm = context.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val wakeLock = pm.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "TimeLapse::VideoRender")
+        wakeLock.acquire(60 * 60 * 1000L) // Max 1 hour
+
         var framesConsumer: FramesConsumer? = null
 
         try {
@@ -594,28 +519,180 @@ class VideoProcessor(
             val finalWidth = (outW / 2) * 2
             val finalHeight = (outH / 2) * 2
 
-            // Use the user's selected preview FPS for export
-            val outFps = (model.previewFps.value ?: 30).coerceAtLeast(1)
+            // Export FPS is the user's output setting. previewFps only controls
+            // the live preview; it must never silently override the saved file.
+            val outFps = (model.outputFps.value ?: model.previewFps.value ?: 30).coerceAtLeast(1)
+            val qualityPercent = (model.fileQuality.value ?: 50).coerceIn(1, 100)
 
             // Check if source is images (RGB from Android) vs video (BGR from OpenCV)
             val sourceIsImages = input is ImagesFramesInput
-            val writer = VideoWriter(outputPath, outFps, model.encodingH265.value ?: false, finalWidth, finalHeight, sourceIsImages)
+            val writer = VideoWriter(outputPath, outFps, model.encodingH265.value ?: false, finalWidth, finalHeight, sourceIsImages, qualityPercent)
 
             val baseEffect = model.visualEffect.value ?: Effect.NONE
             val isEndless = model.isEndless.value ?: false
             // CONVERT TO ENDLESS HERE BEFORE THE WHEN BLOCK
             val effect = if (isEndless) baseEffect.toEndless() else baseEffect
             val frameBlending = model.frameBlending.value ?: 10
-            
-            // FIX 4: Get skipFrames value (default 1 = process all frames)
-            val skipFrames = model.skipFrames.value ?: 1
-            Log.d("VideoProcessor", "Skip frames: $skipFrames")
-            
-            // Calculate total frames to process (needed for filter initialization)
-            val totalFramesToProcess = kotlin.math.ceil((actualEndFrame - actualStartFrame + 1).toDouble() / skipFrames).toInt()
-            
+            // Input speed: keep one source frame in every N, for EVERY effect.
+            // This used to be limited to Effect.NONE ("stacking filters must ingest
+            // 100% of the frames"), which made the slider a no-op in the Effects tab.
+            // Super Resolution is the one deliberate exception: MFSR needs every
+            // frame it can get for sub-pixel coverage, and it is rendered by
+            // MFSRProcessor, not here.
+            val skipFrames = InputSpeed.strideFor(effect, model.skipFrames.value ?: 1)
+            Log.d("VideoProcessor", "Input speed: ${skipFrames}x (effect=$effect)")
+
+            // Sampling is relative to actualStartFrame, so the first frame of the
+            // trimmed range is always kept and this count is exact — it is the
+            // number the progress dialog will actually reach.
+            val totalFramesToProcess =
+                InputSpeed.deliveredCount(actualEndFrame - actualStartFrame + 1, skipFrames)
+
+            // A stacking window larger than the delivered frame count emits ZERO
+            // output frames (SumFramesFilter only outputs at `frames.size >= size`).
+            // At 60x a 100-frame clip delivers 2 frames, so the window must follow.
+            val effectiveFrameBlending =
+                InputSpeed.effectiveWindow(frameBlending, totalFramesToProcess)
+
+            // ...but clamping the window to the delivered count means a run of
+            // `delivered <= window` frames fills it exactly once and emits EXACTLY
+            // ONE output frame. That is a 0-second MP4: MediaStore publishes it,
+            // no gallery plays it, and auto-save used to copy it to the user's
+            // library. Refuse before the work starts. (Measured: a 10 s / 300-frame
+            // clip at 10x delivers 30 frames, which is exactly the default 30-frame
+            // Darken/Average window.)
+            val plannedOutputFrames = if (effect.usesStackWindow) {
+                InputSpeed.windowedOutputCount(totalFramesToProcess, effectiveFrameBlending)
+            } else {
+                totalFramesToProcess
+            }
+            if (plannedOutputFrames < MIN_OUTPUT_FRAMES) {
+                failureMessage = if (effect.usesStackWindow) {
+                    // Report the REQUESTED intensity: the window was clamped down
+                    // to the delivered count precisely because it could not fill.
+                    "Not enough frames: $totalFramesToProcess frame(s) reach a " +
+                        "$frameBlending-frame ${effect.friendlyName} stack, " +
+                        "which yields a single 0-second frame. Lower Input speed or Intensity."
+                } else {
+                    "The selected range has only $totalFramesToProcess frame(s) — " +
+                        "that is not a video."
+                }
+                Log.w("VideoProcessor", "Render refused: ${failureMessage}")
+                return false
+            }
+
+            // ── Learned ETA ──────────────────────────────────────────────
+            // One job covers every phase this render will execute, including the
+            // post-loop retime that the progress bar never shows. The job is left
+            // open (no finish()) so the caller can add the audio mux and gallery
+            // write it performs after startRendering() returns.
+            val stabilizedNow = model.isStabilized.value == true
+            val hasAudioMux = (model.preserveAudio.value == true) && input is VideoFramesInput
+            val etaSignature = com.dan.timelapse.eta.EtaApp.videoSignature(
+                context = context,
+                effect = effect.name,
+                outWidth = finalWidth,
+                outHeight = finalHeight,
+                frames = totalFramesToProcess,
+                stabilized = stabilizedNow
+            )
+            val etaSpec = com.dan.timelapse.eta.EtaSpecs.videoRender(
+                signature = etaSignature,
+                deliveredFrames = totalFramesToProcess,
+                outWidth = finalWidth,
+                outHeight = finalHeight,
+                effect = effect.name,
+                stackWindow = effectiveFrameBlending,
+                stabilized = stabilizedNow,
+                hasAudioMux = hasAudioMux,
+                temperatureC = com.dan.timelapse.eta.EtaApp.batteryTemperatureC(context)
+            )
+            val job = try {
+                com.dan.timelapse.eta.Eta.startJob(context, etaSpec)
+            } catch (e: Exception) {
+                Log.w("EtaEngine", "Could not start ETA job", e)
+                null
+            }
+            etaJob = job
+            Log.i(
+                "EtaEngine",
+                "video job: predicted=${job?.predictedTotalMs?.toLong() ?: -1}ms " +
+                        "frames=$totalFramesToProcess out=${finalWidth}x$finalHeight effect=$effect " +
+                        "stab=$stabilizedNow audio=$hasAudioMux samples=${job?.priorSamples ?: 0} " +
+                        "key=${etaSignature.levelKey(0)}"
+            )
+
+            val renderUnitsPerFrame = com.dan.timelapse.eta.EtaUnits.megapixels(finalWidth, finalHeight)
+                .coerceAtLeast(0.01) *
+                com.dan.timelapse.eta.EtaUnits.effectCost(effect.name, effectiveFrameBlending)
+            val analysisUnits = com.dan.timelapse.eta.EtaUnits.analysisUnits(
+                totalFramesToProcess, finalWidth, finalHeight
+            )
+
             // Push immediately so the UI shows "initializing..." instead of dead air
             onProgressWithStatus?.invoke(0, totalFramesToProcess, "Allocating buffers...")
+            job?.let {
+                onProgressWithETA?.invoke(
+                    0, totalFramesToProcess, "Allocating buffers...", it.remainingMs()
+                )
+            }
+
+            // Pass 1: motion analysis over the whole clip. This runs before the
+            // encoder starts so the smoothing can be zero-phase and the crop can
+            // be solved from the actual correction envelope. Reserving a slice of
+            // the progress bar keeps the two passes monotonic.
+            val progressHead = (totalFramesToProcess / 8).coerceIn(0, totalFramesToProcess)
+            val progressTotal = totalFramesToProcess + progressHead
+            var renderStabilization: RenderStabilizationPlan? = null
+            var stabilizationOrdinal = 0
+            // One-shot diagnostic: if pass 1 produced fewer states than pass 2 consumes,
+            // every later frame silently renders unstabilized. Never silent.
+            var warpExhaustedLogged = false
+            if (model.isStabilized.value == true) {
+                val probe = input.firstFrame()
+                val probeProcessed = try {
+                    if (probe.empty()) null else applyEffects(probe)
+                } finally {
+                    probe.release()
+                }
+                if (probeProcessed != null && !probeProcessed.empty()) {
+                    val probeWidth = probeProcessed.cols()
+                    val probeHeight = probeProcessed.rows()
+                    probeProcessed.release()
+                    val step = skipFrames
+                    val span = (actualEndFrame - actualStartFrame + 1).coerceAtLeast(1)
+                    onProgressWithStatus?.invoke(0, progressTotal, "Analyzing motion...")
+                    job?.beginPhase(com.dan.timelapse.eta.EtaPhase.ANALYZE, analysisUnits)
+                    renderStabilization = buildRenderPlan(
+                        input = input,
+                        startFrame = actualStartFrame,
+                        endFrame = actualEndFrame,
+                        step = step,
+                        renderWidth = probeWidth,
+                        renderHeight = probeHeight
+                    ) { index, _ ->
+                        val progressed = (index - actualStartFrame + 1).coerceIn(0, span)
+                        val scaled = (progressed.toLong() * progressHead / span).toInt()
+                        val remaining = job?.progress(analysisUnits * progressed / span)
+                            ?: -1L
+                        onProgressWithStatus?.invoke(
+                            scaled, progressTotal,
+                            "Analyzing motion ($progressed/$span)"
+                        )
+                        onProgressWithETA?.invoke(
+                            scaled, progressTotal,
+                            "Analyzing motion ($progressed/$span)", remaining
+                        )
+                    }
+                    job?.endPhase()
+                    if (renderStabilization == null) {
+                        // Analysis failed: fall back to the causal path rather than
+                        // rendering without stabilization.
+                        Log.w("Stabilization", "Two-pass analysis unavailable; using causal fallback")
+                    }
+                }
+            }
+            if (model.isProcessingCancelled.value == true) return false
             
             Log.d("VideoProcessor", "Using effect: $effect, isEndless: $isEndless, frameBlending: $frameBlending")
 
@@ -635,21 +712,21 @@ class VideoProcessor(
                 Effect.ENDLESS_DARKEST_PIXELS -> EndlessDarkestPixelsFramesFilter(writer)
                 Effect.ENDLESS_MOTION_EXTRACTION -> EndlessCumulativeMotionFramesFilter(writer)
 
-                Effect.AVERAGE -> AverageFramesFilter(frameBlending, writer)
-                Effect.AVERAGE_WEIGHTED_FOR_LAST -> AverageWeightedForLastFramesFilter(frameBlending, writer)
-                Effect.AVERAGE_WEIGHTED_FOR_LIGHT -> AverageWeightedForLightFramesFilter(frameBlending, writer)
-                Effect.LIGHTEST_PIXELS -> LightestPixelsFramesFilter(frameBlending, writer)
-                Effect.ADD -> AddFramesFilter(frameBlending, writer)
-                Effect.HDR -> HDRFramesFilter(frameBlending, writer)
-                Effect.TRANSITION -> TransitionFramesFilter(frameBlending, writer)
-                Effect.DARKEST_PIXELS -> DarkestPixelsFramesFilter(frameBlending, writer)
-                Effect.MOTION_EXTRACTION -> MotionExtractionWindowFramesFilter(frameBlending, writer)
-                Effect.MEDIAN_STACK -> MedianFramesFilter(frameBlending, true, writer)
+                Effect.AVERAGE -> AverageFramesFilter(effectiveFrameBlending, writer)
+                Effect.AVERAGE_WEIGHTED_FOR_LAST -> AverageWeightedForLastFramesFilter(effectiveFrameBlending, writer)
+                Effect.AVERAGE_WEIGHTED_FOR_LIGHT -> AverageWeightedForLightFramesFilter(effectiveFrameBlending, writer)
+                Effect.LIGHTEST_PIXELS -> LightestPixelsFramesFilter(effectiveFrameBlending, writer)
+                Effect.ADD -> AddFramesFilter(effectiveFrameBlending, writer)
+                Effect.HDR -> HDRFramesFilter(effectiveFrameBlending, writer)
+                Effect.TRANSITION -> TransitionFramesFilter(effectiveFrameBlending, writer)
+                Effect.DARKEST_PIXELS -> DarkestPixelsFramesFilter(effectiveFrameBlending, writer)
+                Effect.MOTION_EXTRACTION -> MotionExtractionWindowFramesFilter(effectiveFrameBlending, writer)
+                Effect.MEDIAN_STACK -> MedianFramesFilter(effectiveFrameBlending, true, writer)
                 else -> writer
             }
 
             // HARD RESET: Flush stale state from previous video renders
-            alignCache.resetAll()
+            resetStabilizationState()
             
             // Reset filter chain state for a clean workspace (new instance per render, safety reset)
             resetFilterChain(framesConsumer)
@@ -703,7 +780,10 @@ class VideoProcessor(
             frameWatchdogThread.isDaemon = true
             frameWatchdogThread.start()
 
-            input.forEachFrame(start = actualStartFrame, progress = { current, total ->
+            val renderUnits = renderUnitsPerFrame * totalFramesToProcess
+            job?.beginPhase(com.dan.timelapse.eta.EtaPhase.RENDER, renderUnits)
+
+            input.forEachFrame(start = actualStartFrame, step = skipFrames, progress = { current, total ->
                 if (current % 30 == 0) Log.d("VideoProcessor", "Processing frame $current of $total")
             }) { index, total, frame ->
                 Log.d("VideoProcessor", "RENDER FRAME: index=$index, total=$total, framesProcessed=$framesProcessed, encodedCount=$encodedFrameCount")
@@ -729,7 +809,7 @@ class VideoProcessor(
                         val warningMsg = if (isPlugged) "Charging & Throttling ($currentTempStr)..." else "Cooling down ($currentTempStr)..."
                         
                         // THE FIX: Use framesProcessed instead of raw index
-                        onProgressWithStatus?.invoke(framesProcessed, totalFramesToProcess, warningMsg)
+                        onProgressWithStatus?.invoke(framesProcessed + progressHead, progressTotal, warningMsg)
                         
                         try { Thread.sleep(if (isPlugged) 1000L else 500L) } catch (_: InterruptedException) {}
                     }
@@ -737,14 +817,11 @@ class VideoProcessor(
                 
                 if (index > actualEndFrame) return@forEachFrame false
 
-                // THE FIX: Stacking filters (Darken, Average, Lightest, etc.) MUST ingest 100%
-                // of the frames to blend them properly. Only skip frames for Effect.NONE.
-                val isStackingEffect = effect != Effect.NONE
-                
-                if (isStackingEffect) {
-                    // Feed ALL frames to stacking filters - don't skip
-                } else if (skipFrames > 1 && index % skipFrames != 0) {
-                    // Traditional Timelapse (Effect.NONE): Drop frames to speed up time
+                // Input speed decimation. The frame source normally honours the
+                // stride itself (and skips the decode); this is the correctness
+                // backstop for a provider that cannot, and it uses the SAME rule:
+                // a stride relative to actualStartFrame, so the first frame is kept.
+                if (!InputSpeed.keeps(index - actualStartFrame, skipFrames)) {
                     frame.release() // Free the memory instantly
                     return@forEachFrame true // Continue to next frame WITHOUT processing
                 }
@@ -768,7 +845,28 @@ class VideoProcessor(
                             processedFrame = applyEffects(frame)
 
                             // 2. Stabilization
-                            val stabilized = applyStabilization(processedFrame!!, index - actualStartFrame)
+                            // Prefer the precomputed (zero-phase, auto-cropped) plan.
+                            // The render loop keeps its own ordinal so trimmed or
+                            // skipped clips can never desynchronize pass 1 and pass 2.
+                            val plan = renderStabilization
+                            val stabilized = if (plan != null) {
+                                val warp = plan.warpAt(stabilizationOrdinal)
+                                stabilizationOrdinal++
+                                if (warp != null) {
+                                    warpFrame(processedFrame!!, warp)
+                                } else {
+                                    if (!warpExhaustedLogged) {
+                                        warpExhaustedLogged = true
+                                        Log.w("VideoProcessor",
+                                            "No stabilization warp for ordinal $stabilizationOrdinal " +
+                                            "— the analysis pass produced fewer states than the " +
+                                            "render consumes. Remaining frames render unstabilized.")
+                                    }
+                                    processedFrame!!
+                                }
+                            } else {
+                                applyStabilization(processedFrame!!, index - actualStartFrame)
+                            }
                             if (stabilized.nativeObj != processedFrame!!.nativeObj) {
                                 processedFrame!!.release()
                             }
@@ -781,7 +879,18 @@ class VideoProcessor(
                                 finalFrame = processedFrame!!.clone()
                             } else {
                                 finalFrame = Mat()
-                                Imgproc.resize(processedFrame, finalFrame, Size(finalWidth.toDouble(), finalHeight.toDouble()))
+                                // Downscaling (e.g. 1080p -> 720p) must use INTER_AREA;
+                                // INTER_LINEAR aliases fine detail.
+                                val downscaling = finalWidth < processedFrame!!.cols() ||
+                                    finalHeight < processedFrame!!.rows()
+                                Imgproc.resize(
+                                    processedFrame,
+                                    finalFrame,
+                                    Size(finalWidth.toDouble(), finalHeight.toDouble()),
+                                    0.0,
+                                    0.0,
+                                    if (downscaling) Imgproc.INTER_AREA else Imgproc.INTER_LINEAR
+                                )
                             }
                             
                             processedFrame!!.release()
@@ -823,12 +932,19 @@ class VideoProcessor(
                         }
                         
                         if (currentTime - lastProgressUpdateTime > progressThrottleMs || framesProcessed == totalFrames) {
-                            val remainingFrames = totalFrames - framesProcessed
-                            val remainingTimeMillis = if (framesProcessed >= WARMUP_FRAMES && emaMsPerFrame > 0) {
-                                (emaMsPerFrame * remainingFrames).toLong()
-                            } else {
-                                -1L // Signal: still calculating
-                            }
+                            val remainingFrames = (totalFrames - framesProcessed).coerceAtLeast(0)
+                            // The learned job is authoritative when it exists: it knows
+                            // the retime/mux/encode tail that "frames left x ms/frame"
+                            // always reported as zero. The EMA below stays as the
+                            // fallback for callers that run without an engine.
+                            val learnedRemaining = job
+                                ?.progress(renderUnitsPerFrame * framesProcessed)
+                            val remainingTimeMillis = learnedRemaining
+                                ?: if (framesProcessed >= WARMUP_FRAMES && emaMsPerFrame > 0) {
+                                    (emaMsPerFrame * remainingFrames).toLong()
+                                } else {
+                                    -1L // Signal: still calculating
+                                }
                             
                             if (effect == Effect.ENDLESS_MEDIAN_STACK && (framesConsumer as? EndlessMedianFramesFilter)?.isTilingMode == true) {
                                 // PASS 1 (Tiling): Scale 0 to 100 -> 0 to 50
@@ -837,10 +953,10 @@ class VideoProcessor(
                                 onProgressWithETA?.invoke(scaledProgress, 100, "Analyzing Frames...", remainingTimeMillis)
                             } else {
                                 // STANDARD RENDER
-                                onProgress?.invoke(framesProcessed, totalFrames)
+                                onProgress?.invoke(framesProcessed + progressHead, progressTotal)
                                 val progressText = "Applying effects ($framesProcessed of $totalFrames frames)"
-                                onProgressWithStatus?.invoke(framesProcessed, totalFrames, progressText)
-                                onProgressWithETA?.invoke(framesProcessed, totalFrames, progressText, remainingTimeMillis)
+                                onProgressWithStatus?.invoke(framesProcessed + progressHead, progressTotal, progressText)
+                                onProgressWithETA?.invoke(framesProcessed + progressHead, progressTotal, progressText, remainingTimeMillis)
                             }
                             
                             lastProgressUpdateTime = currentTime
@@ -869,7 +985,7 @@ class VideoProcessor(
             // REMOVED: Padding to fixed length causes trailing audio issues
             // Now using actual trimmed frame count for output duration
 
-            alignCache.resetAll()
+            resetStabilizationState()
             
             // Reset filter chain state for a clean workspace
             resetFilterChain(framesConsumer)
@@ -893,6 +1009,15 @@ class VideoProcessor(
             
             // 2. TIMESTAMPS OVERRIDE: The Canvas encoder writes timestamps based on CPU wall-clock time.
             // We must strictly retime the file so it plays at a perfect target FPS regardless of render time.
+            job?.let {
+                it.beginPhase(
+                    com.dan.timelapse.eta.EtaPhase.RETIME,
+                    encodedFrameCount.toDouble().coerceAtLeast(1.0)
+                )
+                onProgressWithETA?.invoke(
+                    progressTotal, progressTotal, "Finalizing video...", it.remainingMs()
+                )
+            }
             try {
                 val tempPath = "$outputPath.tmp"
                 val originalFile = java.io.File(outputPath)
@@ -964,7 +1089,28 @@ class VideoProcessor(
                 val tempFile = java.io.File("$outputPath.tmp")
                 if (tempFile.exists()) tempFile.renameTo(java.io.File(outputPath))
             }
-            
+
+            // Never publish a degenerate video. `encodedFrameCount` counts INPUT
+            // frames, so a filter that never filled its window can still have
+            // swallowed hundreds of them; only the writer knows how many frames
+            // reached the encoder, and only the container knows the real duration.
+            // A 1-frame MP4 reports 0 ms and cannot be played — it must not reach
+            // the Finish screen, the auto-save, or MediaStore.
+            if (model.isProcessingCancelled.value != true) {
+                val producedFrames = writer.framesWritten
+                val durationMs = videoDurationMs(outputPath)
+                if (producedFrames < MIN_OUTPUT_FRAMES || (durationMs != null && durationMs <= 0L)) {
+                    failureMessage = "Nothing was saved: the render produced " +
+                        "$producedFrames frame(s)" +
+                        (durationMs?.let { " / $it ms" } ?: "") +
+                        ". Lower Input speed or Intensity."
+                    Log.e("VideoProcessor", "Degenerate output rejected: $failureMessage")
+                    java.io.File(outputPath).delete()
+                    return false
+                }
+                Log.d("VideoProcessor", "Output verified: $producedFrames frames, ${durationMs ?: -1} ms")
+            }
+
             return true
         } catch(e: Exception) {
             Log.e("VideoProcessor", "Render failed", e)
@@ -993,6 +1139,7 @@ class VideoProcessor(
         var capturedMat: org.opencv.core.Mat? = null
 
         try {
+            stillExportMode = true
             val snapshotConsumer = object : FramesConsumer {
                 override fun start() {}
                 override fun consume(index: Int, frame: org.opencv.core.Mat) {
@@ -1031,47 +1178,54 @@ class VideoProcessor(
             }
 
             // HARD RESET: Flush stale state from previous video renders
-            alignCache.resetAll()
+            resetStabilizationState()
             
             // Reset filter chain state for a clean workspace (new instance per render, safety reset)
             resetFilterChain(framesConsumer)
 
             framesConsumer.start()
 
-            val trimRange = model.trimRange.value ?: Pair(1f, 100f)
-            val startFrame: Int
-            val endFrame: Int
-            if (input is com.dan.timelapse.framesinput.ImagesFramesInput) {
-                // Images: trimRange stores 1-based frame indices, convert to 0-based
-                startFrame = trimRange.first.toInt().coerceAtLeast(1) - 1
-                endFrame = trimRange.second.toInt().coerceAtLeast(1) - 1
+            val trimRange = model.trimRange.value ?: Pair(1f, input.size.toFloat())
+            // trimRange is 1-based, convert to 0-based (same for images and video).
+            val trimStartFrame = trimRange.first.toInt().coerceAtLeast(1) - 1
+            val trimEndFrame = trimRange.second.toInt().coerceAtLeast(1) - 1
+            val lastIndex = (input.size - 1).coerceAtLeast(0)
+            val targetFrame = targetFrameIndex.coerceIn(0, lastIndex)
+
+            // An explicitly picked frame wins over the trim range. If it lies
+            // outside the trim, scan just enough frames for the stack to fill
+            // instead of producing an empty bitmap.
+            val startFrame = if (targetFrame in trimStartFrame..trimEndFrame) {
+                trimStartFrame
             } else {
-                // Video: trimRange stores frame indices (1-based), convert to 0-based
-                startFrame = trimRange.first.toInt().coerceAtLeast(1) - 1
-                endFrame = trimRange.second.toInt().coerceAtLeast(1) - 1
+                (targetFrame - framesConsumer.getWindowSize().coerceAtLeast(1) + 1).coerceAtLeast(0)
             }
-            val actualEndFrame = targetFrameIndex.coerceAtMost(endFrame)
-            val skipFrames = model.skipFrames.value ?: 1
+            val actualStartFrame = minOf(startFrame, targetFrame)
+            val actualEndFrame = targetFrame
 
             
             // ==========================================
             // PATH B: LEGACY NON-MFSR PIPELINE
             // ==========================================
-            input.forEachFrame(start = startFrame, progress = { current, total ->
+            input.forEachFrame(start = actualStartFrame, progress = { current, total ->
                 val percent = if (total > 0) ((current.toFloat() / total) * 100).toInt() else 0
                 model.updateRenderProgress(percent)
             }) { index, total, frame ->
                 if (index > actualEndFrame) return@forEachFrame false
                 
                 val isStackingEffect = effect != Effect.NONE
-                if (isStackingEffect || skipFrames == 1 || index % skipFrames == 0) {
+                // A still export is never decimated: input speed is a video-only
+                // transform. Stacking effects need every frame so their window
+                // fills; for NONE we take exactly the frame the user picked rather
+                // than the first multiple of the stride.
+                if (isStackingEffect || index == actualEndFrame) {
                     var processedFrame = applyEffects(frame)
-                    val stabilized = applyStabilization(processedFrame, index - startFrame)
+                    val stabilized = applyStabilization(processedFrame, index - actualStartFrame)
                     if (stabilized.nativeObj != processedFrame.nativeObj) {
                         processedFrame.release()
                     }
                     processedFrame = stabilized
-                    framesConsumer.consume(index - startFrame, processedFrame)
+                    framesConsumer.consume(index - actualStartFrame, processedFrame)
                     processedFrame.release()
                 }
                 true
@@ -1083,22 +1237,13 @@ class VideoProcessor(
                 val bmp = android.graphics.Bitmap.createBitmap(mat.cols(), mat.rows(), android.graphics.Bitmap.Config.ARGB_8888)
                 org.opencv.android.Utils.matToBitmap(mat, bmp)
 
-                val rotation = model.rotation.value ?: 0
-                if (rotation != 0) {
-                    val matrix = android.graphics.Matrix()
-                    matrix.postRotate(rotation.toFloat())
-                    val rotatedBmp = android.graphics.Bitmap.createBitmap(bmp, 0, 0, bmp.width, bmp.height, matrix, true)
-                    bmp.recycle()
-                    java.io.FileOutputStream(outputFile).use { out ->
-                        rotatedBmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
-                    }
-                    rotatedBmp.recycle()
-                } else {
-                    java.io.FileOutputStream(outputFile).use { out ->
-                        bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
-                    }
-                    bmp.recycle()
+                // applyEffects() already applied the TransformState rotation to the
+                // Mat. Rotating the bitmap again here exported 90/180/270-degree
+                // stills upside down or sideways.
+                java.io.FileOutputStream(outputFile).use { out ->
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 100, out)
                 }
+                bmp.recycle()
                 mat.release()
                 return true
                 }
@@ -1106,6 +1251,7 @@ class VideoProcessor(
         } catch (e: Exception) {
             Log.e("VideoProcessor", "Deep render failed", e)
         } finally {
+            stillExportMode = false
             capturedMat?.release()
         }
         return false

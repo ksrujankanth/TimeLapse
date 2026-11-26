@@ -38,7 +38,8 @@ Java_com_dan_timelapse_mfsr_MFSRNative_createEngine(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_dan_timelapse_mfsr_MFSRNative_setSceneStats(
-    JNIEnv* env, jobject, jlong engineAddr, jdouble medianMse, jdouble p90Mse, jdouble sceneSpread, jdouble medianBrightness) {
+    JNIEnv* env, jobject, jlong engineAddr, jdouble medianMse, jdouble p90Mse,
+    jdouble sceneSpread, jdouble medianBrightness) {
 
     if (checkDeadSystem(env)) return;
 
@@ -114,7 +115,7 @@ Java_com_dan_timelapse_mfsr_MFSRNative_initAccumulation(
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_dan_timelapse_mfsr_MFSRNative_accumulateFrame(
-    JNIEnv* env, jobject, jlong engineAddr, jlong frameAddr, jint frameIndex) {
+    JNIEnv* env, jobject, jlong engineAddr, jlong frameAddr, jint callIndex) {
 
     if (checkDeadSystem(env)) return;
 
@@ -127,7 +128,7 @@ Java_com_dan_timelapse_mfsr_MFSRNative_accumulateFrame(
     }
 
     try {
-        engine->accumulateFrame(*frame, frameIndex);
+        engine->accumulateFrame(*frame, callIndex);
     } catch (const std::exception& e) {
         MFSR_LOGE("accumulateFrame: exception: %s", e.what());
     } catch (...) {
@@ -182,6 +183,96 @@ Java_com_dan_timelapse_mfsr_MFSRNative_getStoredFrameCount(
     return engine->getStoredFrameCount();
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_getHoleCount(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return 0;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return 0;
+    return engine->getHoleCount();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_getAccumulatedFrames(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return 0;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return 0;
+    return engine->getAccumulatedFrames();
+}
+
+extern "C" JNIEXPORT jdouble JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_getMeanDensity(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return 0.0;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return 0.0;
+    return engine->getMeanDensity();
+}
+
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_getMotionThreshold(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return 0.0f;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return 0.0f;
+    return engine->getMotionThreshold();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_suggestMaxScale(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return 2;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return 2;
+    return engine->suggestMaxScale();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_setRenderScale(
+    JNIEnv* env, jobject, jlong engineAddr, jfloat scale) {
+
+    if (checkDeadSystem(env)) return;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return;
+    engine->setRenderScale(scale);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_setHighBitDepth(
+    JNIEnv* env, jobject, jlong engineAddr, jboolean on) {
+
+    if (checkDeadSystem(env)) return;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return;
+    engine->setHighBitDepth(on == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_getMotionRejectedSamples(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return 0;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return 0;
+    return engine->getMotionRejectedSamples();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_dan_timelapse_mfsr_MFSRNative_getProcessedCallCount(
+    JNIEnv* env, jobject, jlong engineAddr) {
+
+    if (checkDeadSystem(env)) return -1;
+    auto* engine = reinterpret_cast<MFSREngineV2*>(engineAddr);
+    if (!engine) return -1;
+    return engine->processedCallCount();
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_dan_timelapse_mfsr_MFSRNative_processFrameWithTelemetry(
     JNIEnv* env, jobject, jlong engineAddr, jlong frameAddr, jint frameIndex, jdouble preScanMse) {
@@ -226,13 +317,16 @@ Java_com_dan_timelapse_mfsr_MFSRNative_getTelemetryLine(
     }
 
     const auto& t = engine->getTelemetry(index);
-    char buf[512];
+    char buf[700];
     snprintf(buf, sizeof(buf),
-        "frame=%d mse=%.2f orb_inliers=%d ecc_converged=%d shift=%.2fpx sharp=%.1f brightness=%.1f weight=%.3f accepted=%d pixels=%d/%d reason='%s'",
-        t.frameIndex, t.mseScore, t.orbMatchCount,
-        t.eccConverged ? 1 : 0, t.shiftPx, t.sharpness, t.brightness,
-        t.accumulationWeight, t.accepted ? 1 : 0,
-        t.pixelsAccumulated, t.pixelsTotal,
-        t.rejectionReason.c_str());
+        "frame=%d mse=%.2f orb_inliers=%d ecc_cc=%.4f shift=%.2fpx sharp=%.1f bright=%.1f "
+        "gain=[%.3f,%.3f,%.3f] offset=[%.1f,%.1f,%.1f] motion=%.1f align_err=%.2fpx "
+        "weight=%.3f accepted=%d reason='%s'",
+        t.frameIndex, t.mseScore, t.orbMatchCount, t.eccCorrelation,
+        t.shiftPx, t.sharpness, t.brightness,
+        t.gain[0], t.gain[1], t.gain[2],
+        t.offset[0], t.offset[1], t.offset[2],
+        t.motionDiff, t.alignErrPx,
+        t.accumulationWeight, t.accepted ? 1 : 0, t.rejectionReason.c_str());
     return env->NewStringUTF(buf);
 }
